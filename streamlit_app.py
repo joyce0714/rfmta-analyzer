@@ -29,12 +29,16 @@ def check_authentication():
     if not st.session_state.authenticated:
         st.title("🔐 使用者認證")
         
-        # 簡單的密碼認證（生產環境建議使用 OAuth）
+        # 從 secrets 讀取密碼
+        try:
+            correct_password = st.secrets["security"]["admin_password"]
+        except:
+            correct_password = "your_secure_password_here"  # 備用密碼
+        
         password = st.text_input("請輸入存取密碼", type="password")
         
         if st.button("登入"):
-            # 這裡應該使用更安全的認證方式
-            if password == "your_secure_password_here":  # 請更改為安全密碼
+            if password == correct_password:
                 st.session_state.authenticated = True
                 st.session_state.login_time = datetime.now()
                 st.rerun()
@@ -71,6 +75,12 @@ class SecureRFMTAAnalyzer:
         self.m_bins = None
         self.t_bins = None
         self.a_bins = None
+        self.r_bounds = None
+        self.f_bounds = None
+        self.m_bounds = None
+        self.t_bounds = None
+        self.a_bounds = None
+        self.frequency_by_sheet = None
         
     def create_google_sheet_output(self, export_df, sheet_title="RFMTA_Analysis"):
         """將結果輸出到新的 Google Sheet"""
@@ -152,6 +162,7 @@ class SecureRFMTAAnalyzer:
             labels = list(range(1, len(bins)))
         
         bins = np.unique(bins)
+        print(f"✅ 最終使用的 bins for {series.name}: {bins}")
         return bins, labels, pd.Series(bins)
     
     def load_google_sheets_secure(self, sheet_names):
@@ -219,9 +230,6 @@ class SecureRFMTAAnalyzer:
             
             st.success(f"資料載入完成！總共 {len(self.combined_data)} 筆有效記錄")
             
-            # 清除原始資料以節省記憶體
-            del self.data
-            
             return True
             
         except Exception as e:
@@ -235,6 +243,8 @@ class SecureRFMTAAnalyzer:
                 st.error("請先載入資料")
                 return False
             
+            st.info("開始 RFMTA 分析...")
+            
             now = datetime.now().date()
             email_col = 'Email'
             order_date_col = '訂單時間'
@@ -246,6 +256,11 @@ class SecureRFMTAAnalyzer:
                 self.combined_data[total_amount_col], 
                 errors='coerce'
             ).fillna(0)
+            
+            # 診斷日期解析問題
+            date_na_count = self.combined_data[order_date_col].isna().sum()
+            if date_na_count > 0:
+                st.warning(f"警告：有 {date_na_count} 筆訂單時間無法解析")
             
             # 計算 F（跨作品參與次數）
             frequency_by_sheet = self.combined_data.groupby(['Email', 'SheetSource']).size().reset_index(name='sheet_frequency')
@@ -293,20 +308,53 @@ class SecureRFMTAAnalyzer:
             rfmt['R'] = num_labels - rfmt['R']
             rfmt['R'] = rfmt['R'].fillna(-1).astype(int)
             
+            # 檢查無效 R 值
+            r_neg1_count = (rfmt['R'] == -1).sum()
+            if r_neg1_count > 0:
+                st.warning(f"警告：有 {r_neg1_count} 位客戶因訂單時間解析失敗而被標記為 R=-1")
+            
             # 計算其他指標
             rfmt['Frequency'] = total_frequency.set_index('Email')['sheet_frequency']
             rfmt['Monetary'] = total_monetary.set_index('Email')[total_amount_col]
             rfmt['Times'] = total_times.set_index('Email')['total_times']
             rfmt['Average'] = rfmt['Monetary'] / rfmt['Times']
             rfmt['Name'] = name_selection_df.set_index('Email')['preferred_name']
-            
-            # F, M, T, A 分層
-            self.f_bins, f_labels, _ = self.create_bins_and_labels(rfmt['Frequency'])
-            self.m_bins, m_labels, _ = self.create_bins_and_labels(rfmt['Monetary'])
-            self.t_bins, t_labels, _ = self.create_bins_and_labels(rfmt['Times'])
-            self.a_bins, a_labels, _ = self.create_bins_and_labels(rfmt['Average'])
-            
-            rfmt['F'] = pd.cut(rfmt['Frequency'], bins=self.f_bins, labels=f_labels, include_lowest=True)
+
+            # ============ 修改的 F 計算邏輯開始 ============
+            # F 的固定分級：1作品=F1, 2作品=F2, 3作品=F3, 4+作品=F4
+            def calculate_f_score(frequency):
+                """
+                根據參加作品數計算 F 分數
+                F1 = 參加 1 個作品
+                F2 = 參加 2 個作品  
+                F3 = 參加 3 個作品
+                F4 = 參加 4 個或以上作品
+                """
+                if frequency == 1:
+                    return 1
+                elif frequency == 2:
+                    return 2
+                elif frequency == 3:
+                    return 3
+                elif frequency >= 4:
+                    return 4
+                else:
+                    return 1  # 預設值，理論上不會發生
+
+            # 應用新的 F 計算邏輯
+            rfmt['F'] = rfmt['Frequency'].apply(calculate_f_score)
+
+            # 設定 F 的邊界值（用於輸出說明）
+            self.f_bins = [0.5, 1.5, 2.5, 3.5, float('inf')]  # 分界點
+            self.f_bounds = pd.Series(self.f_bins)  # 保持與原版格式一致
+            # ============ 修改的 F 計算邏輯結束 ============
+
+            # M, T, A 四分位分層（保持原來的邏輯）
+            self.m_bins, m_labels, self.m_bounds = self.create_bins_and_labels(rfmt['Monetary'])
+            self.t_bins, t_labels, self.t_bounds = self.create_bins_and_labels(rfmt['Times'])
+            self.a_bins, a_labels, self.a_bounds = self.create_bins_and_labels(rfmt['Average'])
+
+            # 注意：這裡不再計算 F，因為已經在上面用固定分級了
             rfmt['M'] = pd.cut(rfmt['Monetary'], bins=self.m_bins, labels=m_labels, include_lowest=True)
             rfmt['T'] = pd.cut(rfmt['Times'], bins=self.t_bins, labels=t_labels, include_lowest=True)
             rfmt['A'] = pd.cut(rfmt['Average'], bins=self.a_bins, labels=a_labels, include_lowest=True)
@@ -317,9 +365,7 @@ class SecureRFMTAAnalyzer:
                                  rfmt['A'].astype(str))
             
             self.rfmt_result = rfmt
-            
-            # 清除敏感資料
-            self.combined_data = None
+            self.frequency_by_sheet = frequency_by_sheet
             
             st.success("RFMTA 分析完成！")
             return True
@@ -333,11 +379,107 @@ class SecureRFMTAAnalyzer:
         if self.rfmt_result is None:
             return None
         
-        # 只返回必要的分析結果，不包含原始敏感資料
-        export_columns = ['Email', 'Recency', 'Frequency', 'Monetary', 'Times', 'Average',
-                         'R', 'F', 'M', 'T', 'A', 'RFMTA_Score']
-        
-        return self.rfmt_result[export_columns].copy()
+        try:
+            # 重新獲取完整資料進行匯出
+            # 由於我們保留了 frequency_by_sheet，可以重建需要的資訊
+            
+            # 基本的 RFMTA 結果
+            export_df = self.rfmt_result.copy()
+            export_df = export_df.reset_index()
+            
+            # 重新命名 Name 為 姓名
+            if 'Name' in export_df.columns:
+                export_df = export_df.rename(columns={'Name': '姓名'})
+            
+            # 基本輸出欄位
+            base_columns = ['Email', '姓名', 'Recency', 'Frequency', 'Monetary', 'Times', 'Average',
+                           'R', 'F', 'M', 'T', 'A', 'RFMTA_Score']
+            
+            # 確保所有基本欄位都存在
+            for col in base_columns:
+                if col not in export_df.columns:
+                    export_df[col] = ""
+            
+            # 作品參與次數欄位（從原始資料重建）
+            if hasattr(self, 'combined_data') and self.combined_data is not None:
+                sheet_columns = sorted(set(self.combined_data['SheetSource'].unique()))
+                
+                # 填充每個作品的參與次數
+                for sheet in sheet_columns:
+                    participation_counts = self.combined_data[
+                        self.combined_data['SheetSource'] == sheet
+                    ].groupby('Email').size()
+                    export_df[sheet] = export_df['Email'].map(participation_counts).fillna(0).astype(int)
+            else:
+                sheet_columns = []
+            
+            # 準備邊界說明欄位
+            boundary_columns = []
+            
+            # ============ R 的邊界說明 ============
+            if hasattr(self, 'r_bins') and self.r_bins is not None:
+                for i in range(len(self.r_bins)-1):
+                    idx = len(self.r_bins) - 2 - i  # 反轉索引
+                    next_idx = idx + 1
+                    export_df[f'R{i+1}_Boundary'] = f"R{i+1}: {self.r_bins[idx]:.0f} to less than {self.r_bins[next_idx]:.0f} days"
+                    boundary_columns.append(f'R{i+1}_Boundary')
+            
+            # ============ F 的邊界說明（修改後的固定分級）============
+            f_boundary_descriptions = [
+                "F1: participated in 1 different work",
+                "F2: participated in 2 different works", 
+                "F3: participated in 3 different works",
+                "F4: participated in 4 or more different works"
+            ]
+            
+            for i, description in enumerate(f_boundary_descriptions):
+                export_df[f'F{i+1}_Boundary'] = description
+                boundary_columns.append(f'F{i+1}_Boundary')
+            
+            # ============ M 的邊界說明 ============
+            if hasattr(self, 'm_bins') and self.m_bins is not None:
+                for i in range(len(self.m_bins)-1):
+                    if i == len(self.m_bins)-2:
+                        export_df[f'M{i+1}_Boundary'] = f"M{i+1}: ${self.m_bins[i]:.0f} and above"
+                    else:
+                        next_value = self.m_bins[i+1]
+                        export_df[f'M{i+1}_Boundary'] = f"M{i+1}: ${self.m_bins[i]:.0f} to less than ${next_value:.0f}"
+                    boundary_columns.append(f'M{i+1}_Boundary')
+            
+            # ============ T 的邊界說明 ============
+            if hasattr(self, 't_bins') and self.t_bins is not None:
+                for i in range(len(self.t_bins)-1):
+                    if i == len(self.t_bins)-2:
+                        export_df[f'T{i+1}_Boundary'] = f"T{i+1}: {int(self.t_bins[i])} times or more in total"
+                    else:
+                        current_value = int(self.t_bins[i]) + 1 if i > 0 else int(self.t_bins[i])
+                        next_value = int(self.t_bins[i+1])
+                        export_df[f'T{i+1}_Boundary'] = f"T{i+1}: {current_value} to {next_value} times in total"
+                    boundary_columns.append(f'T{i+1}_Boundary')
+            
+            # ============ A 的邊界說明 ============
+            if hasattr(self, 'a_bins') and self.a_bins is not None:
+                for i in range(len(self.a_bins)-1):
+                    if i == len(self.a_bins)-2:
+                        export_df[f'A{i+1}_Boundary'] = f"A{i+1}: ${self.a_bins[i]:.0f} and above per participation"
+                    else:
+                        next_value = self.a_bins[i+1]
+                        export_df[f'A{i+1}_Boundary'] = f"A{i+1}: ${self.a_bins[i]:.0f} to less than ${next_value:.0f} per participation"
+                    boundary_columns.append(f'A{i+1}_Boundary')
+            
+            # 組合最終的欄位順序
+            columns_to_export = base_columns + sheet_columns + boundary_columns
+            
+            # 確保所有指定的列都存在，若不存在則填充為空
+            for col in columns_to_export:
+                if col not in export_df.columns:
+                    export_df[col] = ""
+            
+            return export_df[columns_to_export].copy()
+            
+        except Exception as e:
+            st.error(f"準備匯出資料時發生錯誤: {str(e)}")
+            return None
 
 # Streamlit 應用程式主體
 def main():
@@ -400,6 +542,13 @@ def main():
             unique_sheets = st.session_state.analyzer.combined_data['SheetSource'].nunique()
             st.metric("作品數量", unique_sheets)
         
+        # 顯示作品參與統計
+        if st.checkbox("顯示作品參與統計"):
+            sheet_counts = st.session_state.analyzer.combined_data['SheetSource'].value_counts()
+            st.write("**各作品參與統計:**")
+            for sheet, count in sheet_counts.items():
+                st.write(f"- {sheet}: {count} 筆記錄")
+        
         # 分析按鈕
         if st.button("🔍 執行 RFMTA 分析", type="primary"):
             with st.spinner("分析中..."):
@@ -425,6 +574,13 @@ def main():
             sample_scores = st.session_state.analyzer.rfmt_result['RFMTA_Score'].head(5)
             for score in sample_scores.values:
                 st.write(f"Score: {score}")
+        
+        # 顯示完整結果表格
+        if st.checkbox("顯示完整分析結果"):
+            # 不顯示敏感的 Email 和姓名資訊
+            display_columns = ['Recency', 'Frequency', 'Monetary', 'Times', 'Average', 'R', 'F', 'M', 'T', 'A', 'RFMTA_Score']
+            available_columns = [col for col in display_columns if col in st.session_state.analyzer.rfmt_result.columns]
+            st.dataframe(st.session_state.analyzer.rfmt_result[available_columns])
         
         # 創建 Google Sheet 輸出
         st.subheader("📊 創建分析結果 Google Sheet")
@@ -453,6 +609,30 @@ def main():
                         - 您可以直接分享上方連結給同事
                         - 如需更改權限，請在 Google Sheet 中點擊右上角「分享」按鈕
                         """)
+                        
+                        # 顯示匯出欄位說明
+                        with st.expander("📋 匯出欄位說明"):
+                            st.markdown("""
+                            **基本欄位:**
+                            - Email, 姓名, Recency, Frequency, Monetary, Times, Average
+                            - R, F, M, T, A, RFMTA_Score
+                            
+                            **作品參與次數:**
+                            - 各作品的個別參與次數統計
+                            
+                            **邊界說明:**
+                            - R1-R4_Boundary: 最近購買時間分級說明
+                            - F1-F4_Boundary: 參與作品數分級說明（固定分級）
+                            - M1-M4_Boundary: 消費金額分級說明
+                            - T1-T4_Boundary: 總參與次數分級說明
+                            - A1-A4_Boundary: 平均消費分級說明
+                            
+                            **F 分級特色（已修改為固定分級）:**
+                            - F1: 參加 1 個作品
+                            - F2: 參加 2 個作品
+                            - F3: 參加 3 個作品
+                            - F4: 參加 4 個或以上作品
+                            """)
     
     else:
         if st.session_state.analyzer.combined_data is None:
@@ -473,6 +653,13 @@ def main():
             2. 點擊「載入資料」
             3. 執行 RFMTA 分析
             4. 創建結果 Google Sheet 並分享
+            
+            **RFMTA 分析說明:**
+            - **R (Recency)**: 最近購買時間（四分位數分級）
+            - **F (Frequency)**: 跨作品參與次數（固定分級：1,2,3,4+個作品）
+            - **M (Monetary)**: 總消費金額（四分位數分級）
+            - **T (Times)**: 總參與次數（四分位數分級）
+            - **A (Average)**: 平均每次消費金額（四分位數分級）
             """)
 
 if __name__ == "__main__":
