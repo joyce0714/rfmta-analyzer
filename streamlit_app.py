@@ -481,6 +481,184 @@ class SecureRFMTAAnalyzer:
             st.error(f"準備匯出資料時發生錯誤: {str(e)}")
             return None
 
+    def create_or_update_google_sheet(self, export_df, sheet_title="RFMTA_Dashboard"):
+        """更新固定的 Google Sheet，適合 Looker Studio 連接"""
+        try:
+            # 使用 Streamlit secrets 中的憑證
+            credentials_dict = st.secrets["google_credentials"]
+            credentials = Credentials.from_service_account_info(
+                credentials_dict,
+                scopes=['https://spreadsheets.google.com/feeds', 
+                       'https://www.googleapis.com/auth/drive']
+            )
+            
+            client = gspread.authorize(credentials)
+            
+            # 固定的工作表名稱
+            fixed_sheet_name = sheet_title
+            
+            try:
+                # 嘗試開啟現有的工作表
+                spreadsheet = client.open(fixed_sheet_name)
+                st.info(f"✅ 找到現有工作表：{fixed_sheet_name}")
+                
+            except gspread.SpreadsheetNotFound:
+                # 如果工作表不存在，創建新的
+                spreadsheet = client.create(fixed_sheet_name)
+                spreadsheet.share(None, perm_type='anyone', role='writer')
+                st.success(f"🆕 創建新工作表：{fixed_sheet_name}")
+            
+            # 選擇第一個工作表
+            worksheet = spreadsheet.sheet1
+            
+            # 清空現有數據
+            worksheet.clear()
+            st.info("🧹 清空舊數據...")
+            
+            # 準備新數據
+            data_to_write = []
+            
+            # 添加分析時間戳記到第一行
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            data_to_write.append([f"最後更新時間: {timestamp}"])
+            data_to_write.append([])  # 空行
+            
+            # 標題行
+            headers = list(export_df.columns)
+            data_to_write.append(headers)
+            
+            # 資料行
+            for _, row in export_df.iterrows():
+                row_data = []
+                for col in headers:
+                    value = row[col]
+                    if pd.isna(value):
+                        row_data.append("")
+                    elif isinstance(value, (int, float)):
+                        row_data.append(value)  # 保持數值格式
+                    else:
+                        row_data.append(str(value))
+                data_to_write.append(row_data)
+            
+            # 一次性寫入所有資料
+            worksheet.update(data_to_write)
+            st.success("📊 數據更新完成！")
+            
+            # 格式化標題行（第3行是真正的標題）
+            worksheet.format("3:3", {
+                "backgroundColor": {"red": 0.2, "green": 0.6, "blue": 0.9},
+                "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}
+            })
+            
+            # 格式化時間戳記行
+            worksheet.format("1:1", {
+                "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9},
+                "textFormat": {"bold": True, "fontSize": 10}
+            })
+            
+            # 自動調整欄寬
+            worksheet.columns_auto_resize(0, len(headers)-1)
+            
+            return spreadsheet.url, fixed_sheet_name
+            
+        except Exception as e:
+            st.error(f"更新 Google Sheet 時發生錯誤: {str(e)}")
+            return None, None
+    
+    def create_or_update_google_sheet_with_history(self, export_df, sheet_title="RFMTA_Dashboard"):
+        """更新固定 Google Sheet，同時保留歷史記錄"""
+        try:
+            credentials_dict = st.secrets["google_credentials"]
+            credentials = Credentials.from_service_account_info(
+                credentials_dict,
+                scopes=['https://spreadsheets.google.com/feeds', 
+                       'https://www.googleapis.com/auth/drive']
+            )
+            
+            client = gspread.authorize(credentials)
+            fixed_sheet_name = sheet_title
+            
+            try:
+                spreadsheet = client.open(fixed_sheet_name)
+                st.info(f"✅ 找到現有工作表：{fixed_sheet_name}")
+            except gspread.SpreadsheetNotFound:
+                spreadsheet = client.create(fixed_sheet_name)
+                spreadsheet.share(None, perm_type='anyone', role='writer')
+                st.success(f"🆕 創建新工作表：{fixed_sheet_name}")
+            
+            # 確保有需要的工作表分頁
+            worksheet_names = [ws.title for ws in spreadsheet.worksheets()]
+            
+            # 主要數據工作表（供 Looker Studio 使用）
+            if "最新數據" not in worksheet_names:
+                main_worksheet = spreadsheet.add_worksheet(title="最新數據", rows=1000, cols=50)
+            else:
+                main_worksheet = spreadsheet.worksheet("最新數據")
+            
+            # 歷史記錄工作表
+            if "歷史記錄" not in worksheet_names:
+                history_worksheet = spreadsheet.add_worksheet(title="歷史記錄", rows=10000, cols=10)
+            else:
+                history_worksheet = spreadsheet.worksheet("歷史記錄")
+            
+            # === 更新主要數據工作表 ===
+            main_worksheet.clear()
+            
+            # 準備主要數據
+            data_to_write = []
+            headers = list(export_df.columns)
+            data_to_write.append(headers)
+            
+            for _, row in export_df.iterrows():
+                row_data = []
+                for col in headers:
+                    value = row[col]
+                    if pd.isna(value):
+                        row_data.append("")
+                    elif isinstance(value, (int, float)):
+                        row_data.append(value)
+                    else:
+                        row_data.append(str(value))
+                data_to_write.append(row_data)
+            
+            main_worksheet.update(data_to_write)
+            
+            # 格式化主要數據工作表
+            main_worksheet.format("1:1", {
+                "backgroundColor": {"red": 0.2, "green": 0.6, "blue": 0.9},
+                "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}
+            })
+            
+            # === 更新歷史記錄 ===
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            customer_count = len(export_df)
+            total_revenue = export_df['Monetary'].sum() if 'Monetary' in export_df.columns else 0
+            
+            # 獲取現有歷史記錄
+            try:
+                existing_history = history_worksheet.get_all_records()
+            except:
+                existing_history = []
+                # 添加標題行
+                history_worksheet.update("A1:E1", [["分析時間", "客戶數量", "總收入", "平均客單價", "備註"]])
+            
+            # 添加新記錄
+            avg_revenue = total_revenue / customer_count if customer_count > 0 else 0
+            new_record = [timestamp, customer_count, f"${total_revenue:.0f}", f"${avg_revenue:.0f}", "自動分析"]
+            
+            # 找到下一個空行
+            next_row = len(existing_history) + 2  # +2 因為有標題行且從1開始計數
+            history_worksheet.update(f"A{next_row}:E{next_row}", [new_record])
+            
+            st.success("📊 主要數據和歷史記錄都已更新！")
+            
+            return spreadsheet.url, fixed_sheet_name
+            
+        except Exception as e:
+            st.error(f"更新 Google Sheet 時發生錯誤: {str(e)}")
+            return None, None
+
+
 # Streamlit 應用程式主體
 def main():
     # 檢查認證
@@ -582,33 +760,84 @@ def main():
             available_columns = [col for col in display_columns if col in st.session_state.analyzer.rfmt_result.columns]
             st.dataframe(st.session_state.analyzer.rfmt_result[available_columns])
         
-        # 創建 Google Sheet 輸出
-        st.subheader("📊 創建分析結果 Google Sheet")
+        # 創建/更新 Google Sheet 輸出
+        st.subheader("📊 更新 RFMTA Dashboard")
         
-        output_title = st.text_input("輸出檔案名稱", value="RFMTA_Analysis")
+        # 選擇更新模式
+        update_mode = st.radio(
+            "選擇更新模式",
+            options=["更新固定工作表（推薦給 Looker Studio）", "創建新工作表（含時間戳記）"],
+            help="固定工作表模式適合連接 Looker Studio，數據會自動更新"
+        )
         
-        if st.button("📝 創建 Google Sheet", type="primary"):
+        # 工作表名稱設定
+        if update_mode == "更新固定工作表（推薦給 Looker Studio）":
+            sheet_name = st.text_input("固定工作表名稱", value="RFMTA_Dashboard", 
+                                      help="這個名稱將固定使用，每次分析會更新相同工作表")
+            button_text = "🔄 更新 Dashboard"
+            button_help = "更新固定工作表中的數據，適合 Looker Studio 自動同步"
+        else:
+            sheet_name = st.text_input("工作表名稱", value="RFMTA_Analysis")
+            button_text = "📝 創建新工作表"
+            button_help = "創建包含時間戳記的新工作表"
+        
+        # 執行按鈕
+        if st.button(button_text, type="primary", help=button_help):
             with st.spinner("正在創建 Google Sheet..."):
                 export_data = st.session_state.analyzer.get_export_data()
                 
                 if export_data is not None:
-                    sheet_url, sheet_name = st.session_state.analyzer.create_google_sheet_output(
-                        export_data, 
-                        sanitize_input(output_title)
-                    )
-                    
-                    if sheet_url:
-                        st.success("✅ Google Sheet 創建成功！")
-                        st.markdown(f"**📋 工作表名稱:** {sheet_name}")
-                        st.markdown(f"**🔗 [點擊這裡開啟 Google Sheet]({sheet_url})**")
+                    if update_mode == "更新固定工作表（推薦給 Looker Studio）":
+                        # 使用固定工作表更新模式
+                        sheet_url, final_sheet_name = st.session_state.analyzer.create_or_update_google_sheet_with_history(
+                            export_data, 
+                            sanitize_input(sheet_name)
+                        )
                         
-                        # 分享指引
-                        st.info("""
-                        **分享說明:**
-                        - 此 Google Sheet 已設定為「任何有連結的人都可以編輯」
-                        - 您可以直接分享上方連結給同事
-                        - 如需更改權限，請在 Google Sheet 中點擊右上角「分享」按鈕
-                        """)
+                        if sheet_url:
+                            st.success("✅ Dashboard 更新成功！")
+                            st.markdown(f"**📋 工作表名稱:** {final_sheet_name}")
+                            st.markdown(f"**🔗 [點擊開啟 RFMTA Dashboard]({sheet_url})**")
+                            
+                            # Looker Studio 連接指引
+                            with st.expander("📊 如何連接到 Looker Studio"):
+                                st.markdown(f"""
+                                **步驟 1:** 前往 [Looker Studio](https://lookerstudio.google.com/)
+                                
+                                **步驟 2:** 點擊 "建立" → "資料來源"
+                                
+                                **步驟 3:** 選擇 "Google 試算表"
+                                
+                                **步驟 4:** 選擇工作表：`{final_sheet_name}`
+                                
+                                **步驟 5:** 選擇工作表分頁：`最新數據`
+                                
+                                **步驟 6:** 點擊 "建立報表"
+                                
+                                🎯 **好處:** 每次你更新分析，Looker Studio 會自動同步最新數據！
+                                """)
+                            
+                            # 分享指引
+                            st.info("""
+                            **Dashboard 使用說明:**
+                            - 📊 **最新數據** 分頁：供 Looker Studio 連接使用
+                            - 📈 **歷史記錄** 分頁：記錄每次分析的摘要資訊
+                            - 🔄 每次分析會自動更新數據，無需手動操作
+                            """)
+                            
+                    else:
+                        # 使用原本的創建新工作表模式
+                        sheet_url, final_sheet_name = st.session_state.analyzer.create_google_sheet_output(
+                            export_data, 
+                            sanitize_input(sheet_name)
+                        )
+                        
+                        if sheet_url:
+                            st.success("✅ 新工作表創建成功！")
+                            st.markdown(f"**📋 工作表名稱:** {final_sheet_name}")
+                            st.markdown(f"**🔗 [點擊開啟 Google Sheet]({sheet_url})**")
+                    
+                    
                         
                         # 顯示匯出欄位說明
                         with st.expander("📋 匯出欄位說明"):
