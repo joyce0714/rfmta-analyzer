@@ -1013,6 +1013,179 @@ class SecureRFMTAAnalyzer:
             - 建議嘗試 "更新固定工作表" 模式
             """)
 
+    def detailed_storage_diagnosis(self):
+        """詳細的儲存空間診斷"""
+        try:
+            from googleapiclient.discovery import build
+            
+            credentials_dict = st.secrets["google_credentials"]
+            credentials = Credentials.from_service_account_info(
+                credentials_dict,
+                scopes=['https://www.googleapis.com/auth/drive', 
+                       'https://www.googleapis.com/auth/drive.metadata.readonly']
+            )
+            
+            drive_service = build('drive', 'v3', credentials=credentials)
+            
+            # 1. 嘗試獲取完整的帳戶資訊
+            st.write("**🔍 Step 1: 獲取帳戶基本資訊**")
+            try:
+                about = drive_service.about().get(
+                    fields='user,storageQuota,kind,appInstalled'
+                ).execute()
+                
+                user_info = about.get('user', {})
+                storage_info = about.get('storageQuota', {})
+                
+                st.success(f"""
+                **👤 帳戶資訊：**
+                - 顯示名稱：{user_info.get('displayName', '未知')}
+                - Email：{user_info.get('emailAddress', '未知')}
+                - 帳戶類型：{about.get('kind', '未知')}
+                """)
+                
+                st.info(f"""
+                **💾 儲存空間原始資訊：**
+                - limit: {storage_info.get('limit', '無')}
+                - usage: {storage_info.get('usage', '無')}
+                - usageInDrive: {storage_info.get('usageInDrive', '無')}
+                - usageInDriveTrash: {storage_info.get('usageInDriveTrash', '無')}
+                """)
+                
+            except Exception as e:
+                st.error(f"獲取帳戶資訊失敗：{str(e)}")
+            
+            # 2. 嘗試創建一個測試檔案來確認空間狀況
+            st.write("**🧪 Step 2: 測試創建小檔案**")
+            try:
+                # 嘗試創建一個很小的測試檔案
+                import io
+                
+                # 創建一個 1KB 的測試檔案
+                test_content = "Test file for storage diagnosis\n" * 50
+                test_file = io.StringIO(test_content)
+                
+                file_metadata = {
+                    'name': f'Storage_Test_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+                }
+                
+                # 上傳測試檔案
+                media = drive_service.files().create(
+                    body=file_metadata,
+                    media_body=test_content.encode()
+                ).execute()
+                
+                st.success("✅ 成功創建測試檔案！這表示儲存空間沒有問題")
+                
+                # 立即刪除測試檔案
+                drive_service.files().delete(fileId=media['id']).execute()
+                st.info("🗑️ 已清理測試檔案")
+                
+                return "storage_available"
+                
+            except Exception as e:
+                error_msg = str(e).lower()
+                
+                if "quota" in error_msg or "storage" in error_msg:
+                    st.error("❌ 確認：儲存空間確實已滿")
+                    return "storage_full"
+                else:
+                    st.warning(f"⚠️ 創建測試檔案失敗：{str(e)}")
+                    return "unknown_error"
+            
+            # 3. 檢查現有檔案的大小
+            st.write("**📊 Step 3: 計算現有檔案大小**")
+            try:
+                files_response = drive_service.files().list(
+                    q="'me' in owners",
+                    fields="files(id,name,size,mimeType,createdTime)"
+                ).execute()
+                
+                files = files_response.get('files', [])
+                total_size = 0
+                
+                for file_info in files:
+                    size = file_info.get('size')
+                    if size and size.isdigit():
+                        total_size += int(size)
+                
+                total_size_gb = total_size / (1024**3)
+                
+                st.info(f"""
+                **📁 服務帳戶擁有的檔案統計：**
+                - 檔案數量：{len(files)}
+                - 總大小：{total_size_gb:.2f} GB
+                """)
+                
+                if len(files) > 0:
+                    st.write("**前 5 個檔案：**")
+                    for i, file_info in enumerate(files[:5], 1):
+                        name = file_info.get('name', '未知')
+                        size = file_info.get('size', '0')
+                        size_mb = int(size) / (1024 * 1024) if size and size.isdigit() else 0
+                        mime_type = file_info.get('mimeType', '未知')
+                        
+                        st.write(f"  {i}. **{name}** ({size_mb:.1f} MB) - {mime_type}")
+                
+                return "diagnosis_complete"
+                
+            except Exception as e:
+                st.error(f"檢查檔案大小失敗：{str(e)}")
+                return "file_check_failed"
+                
+        except Exception as e:
+            st.error(f"診斷過程失敗：{str(e)}")
+            return "diagnosis_failed"
+    
+    def test_sheet_creation_directly(self):
+        """直接測試工作表創建"""
+        st.write("**🧪 直接測試 Google Sheets 創建**")
+        
+        try:
+            credentials_dict = st.secrets["google_credentials"]
+            credentials = Credentials.from_service_account_info(
+                credentials_dict,
+                scopes=['https://spreadsheets.google.com/feeds', 
+                       'https://www.googleapis.com/auth/drive']
+            )
+            
+            client = gspread.authorize(credentials)
+            
+            # 嘗試創建一個很小的測試工作表
+            test_name = f"Storage_Test_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            
+            st.info(f"🧪 嘗試創建測試工作表：{test_name}")
+            
+            spreadsheet = client.create(test_name)
+            worksheet = spreadsheet.sheet1
+            
+            # 寫入一些測試資料
+            worksheet.update('A1:B2', [['Test', 'Data'], ['Success', 'True']])
+            
+            st.success("✅ 測試工作表創建成功！")
+            st.success(f"📋 測試工作表連結：{spreadsheet.url}")
+            
+            # 詢問是否要刪除測試工作表
+            st.warning("⚠️ 是否要刪除這個測試工作表？")
+            
+            return spreadsheet.id, spreadsheet.url
+            
+        except Exception as e:
+            error_msg = str(e)
+            st.error(f"❌ 測試工作表創建失敗：{error_msg}")
+            
+            # 詳細錯誤分析
+            if "quota" in error_msg.lower():
+                st.error("🔍 **確認原因：** 配額限制（可能是儲存空間或 API 配額）")
+            elif "permission" in error_msg.lower() or "403" in error_msg:
+                st.error("🔍 **確認原因：** 權限不足")
+            elif "401" in error_msg:
+                st.error("🔍 **確認原因：** 認證問題")
+            else:
+                st.error(f"🔍 **確認原因：** 其他錯誤 - {error_msg}")
+            
+            return None, None
+
     def cleanup_old_sheets(self, keep_latest=5):
         """清理舊的 RFMTA 分析工作表，保留最新的幾個"""
         try:
@@ -1169,6 +1342,20 @@ def main():
         with st.spinner("檢查所有檔案中..."):
             all_files_info = st.session_state.analyzer.check_all_drive_files()
 
+    # 在現有的診斷按鈕後面添加：
+
+    if st.sidebar.button("🧪 詳細儲存診斷"):
+        with st.spinner("執行詳細診斷..."):
+            result = st.session_state.analyzer.detailed_storage_diagnosis()
+    
+    if st.sidebar.button("📝 測試工作表創建"):
+        with st.spinner("測試創建工作表..."):
+            test_id, test_url = st.session_state.analyzer.test_sheet_creation_directly()
+            if test_id:
+                if st.sidebar.button("🗑️ 刪除測試工作表"):
+                    # 可以在這裡添加刪除邏輯
+                    st.sidebar.success("測試工作表已刪除")
+    
     # 綜合診斷
     st.sidebar.markdown("---")
     st.sidebar.subheader("🔍 問題診斷")
