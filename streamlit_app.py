@@ -141,7 +141,30 @@ class SecureRFMTAAnalyzer:
             return spreadsheet.url, sheet_name
             
         except Exception as e:
-            st.error(f"創建 Google Sheet 時發生錯誤: {str(e)}")
+            error_msg = str(e)
+            if "storage quota" in error_msg or "quota" in error_msg:
+                st.error("⚠️ Google Drive 儲存空間已滿！")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("""
+                    **💡 立即解決方案：**
+                    1. 選擇 "更新固定工作表" 模式
+                    2. 使用現有工作表名稱
+                    3. 這樣不會占用新空間
+                    """)
+                
+                with col2:
+                    st.markdown("""
+                    **🛠️ 長期解決方案：**
+                    1. 在左側點擊 "📊 檢查儲存空間"
+                    2. 然後點擊 "🧹 清理舊工作表"
+                    3. 或使用 "🚨 緊急清理"
+                    """)
+            else:
+                st.error(f"創建 Google Sheet 時發生錯誤: {error_msg}")
+            
             return None, None
     
     @staticmethod
@@ -658,6 +681,105 @@ class SecureRFMTAAnalyzer:
             st.error(f"更新 Google Sheet 時發生錯誤: {str(e)}")
             return None, None
 
+    def cleanup_old_sheets(self, keep_latest=5):
+        """清理舊的 RFMTA 分析工作表，保留最新的幾個"""
+        try:
+            # 使用 Streamlit secrets 中的憑證
+            credentials_dict = st.secrets["google_credentials"]
+            credentials = Credentials.from_service_account_info(
+                credentials_dict,
+                scopes=['https://spreadsheets.google.com/feeds', 
+                       'https://www.googleapis.com/auth/drive']
+            )
+            
+            client = gspread.authorize(credentials)
+            
+            # 取得所有工作表
+            all_sheets = client.list_spreadsheet_files()
+            
+            # 篩選出 RFMTA 相關的工作表（帶時間戳記的）
+            rfmta_sheets = []
+            for sheet in all_sheets:
+                name = sheet.get('name', '')
+                # 找出帶時間戳記的工作表，但保留固定名稱的工作表
+                if 'RFMTA' in name and ('_202' in name or '_201' in name):  # 帶年份時間戳記的
+                    rfmta_sheets.append({
+                        'id': sheet['id'],
+                        'name': name,
+                        'createdTime': sheet.get('createdTime', '')
+                    })
+            
+            st.info(f"找到 {len(rfmta_sheets)} 個帶時間戳記的 RFMTA 工作表")
+            
+            # 按創建時間排序（最新的在前）
+            rfmta_sheets.sort(key=lambda x: x['createdTime'], reverse=True)
+            
+            # 刪除多餘的舊工作表
+            deleted_count = 0
+            if len(rfmta_sheets) > keep_latest:
+                sheets_to_delete = rfmta_sheets[keep_latest:]
+                
+                for sheet in sheets_to_delete:
+                    try:
+                        # 刪除工作表
+                        spreadsheet = client.open_by_key(sheet['id'])
+                        client.del_spreadsheet(sheet['id'])
+                        deleted_count += 1
+                        st.info(f"✅ 已刪除: {sheet['name']}")
+                    except Exception as e:
+                        st.warning(f"❌ 無法刪除 {sheet['name']}: {str(e)}")
+            
+            if deleted_count > 0:
+                st.success(f"🎉 清理完成！已刪除 {deleted_count} 個舊工作表，保留最新 {keep_latest} 個")
+            else:
+                st.info("✨ 沒有需要清理的舊工作表")
+                
+            return deleted_count
+            
+        except Exception as e:
+            st.error(f"清理過程中發生錯誤: {str(e)}")
+            return 0
+
+    def check_drive_usage(self):
+        """檢查 Google Drive 使用情況"""
+        try:
+            credentials_dict = st.secrets["google_credentials"]
+            credentials = Credentials.from_service_account_info(
+                credentials_dict,
+                scopes=['https://spreadsheets.google.com/feeds', 
+                       'https://www.googleapis.com/auth/drive']
+            )
+            
+            client = gspread.authorize(credentials)
+            
+            # 取得所有檔案清單
+            all_files = client.list_spreadsheet_files()
+            
+            total_files = len(all_files)
+            rfmta_files = sum(1 for f in all_files if 'RFMTA' in f.get('name', ''))
+            rfmta_timestamped = sum(1 for f in all_files 
+                                  if 'RFMTA' in f.get('name', '') and ('_202' in f.get('name', '') or '_201' in f.get('name', '')))
+            
+            st.info(f"""
+            **📊 Google Drive 使用情況：**
+            - 📁 總檔案數：{total_files}
+            - 📋 RFMTA 相關檔案：{rfmta_files}
+            - 🕐 帶時間戳記的檔案：{rfmta_timestamped}
+            """)
+            
+            # 顯示最近的檔案
+            rfmta_recent = [f for f in all_files if 'RFMTA' in f.get('name', '')][:5]
+            if rfmta_recent:
+                st.write("**📋 最近的 RFMTA 檔案：**")
+                for f in rfmta_recent:
+                    st.write(f"- {f.get('name', '未知')}")
+            
+            return total_files, rfmta_files, rfmta_timestamped
+            
+        except Exception as e:
+            st.warning(f"無法檢查 Drive 使用情況: {str(e)}")
+            return 0, 0, 0
+
 
 # Streamlit 應用程式主體
 def main():
@@ -701,6 +823,33 @@ def main():
                     st.rerun()
         else:
             st.sidebar.error("請輸入工作表名稱")
+    # 添加以下內容：
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🗂️ Drive 管理")
+    
+    # 檢查 Drive 使用情況
+    if st.sidebar.button("📊 檢查儲存空間"):
+        with st.spinner("檢查中..."):
+            total_files, rfmta_files, timestamped_files = st.session_state.analyzer.check_drive_usage()
+    
+    # 清理選項
+    st.sidebar.write("**清理選項：**")
+    keep_count = st.sidebar.selectbox("保留最新幾個檔案", [3, 5, 10, 15], index=1)
+    
+    if st.sidebar.button("🧹 清理舊工作表"):
+        if st.sidebar.button("確認清理", type="secondary"):
+            with st.spinner("清理中，請稍候..."):
+                deleted_count = st.session_state.analyzer.cleanup_old_sheets(keep_latest=keep_count)
+                if deleted_count > 0:
+                    st.sidebar.success(f"✅ 已清理 {deleted_count} 個檔案")
+                    st.sidebar.info("💡 現在可以創建新工作表了！")
+    
+    # 緊急清理（如果遇到空間問題）
+    if st.sidebar.button("🚨 緊急清理（僅保留3個）", type="secondary"):
+        with st.spinner("緊急清理中..."):
+            deleted_count = st.session_state.analyzer.cleanup_old_sheets(keep_latest=2)
+            if deleted_count > 0:
+                st.sidebar.success(f"✅ 緊急清理完成！刪除了 {deleted_count} 個檔案")
     
     # 主要內容區域
     if st.session_state.analyzer.combined_data is not None:
@@ -736,6 +885,22 @@ def main():
     
     # 顯示分析結果
     if st.session_state.analyzer.rfmt_result is not None:
+        # 添加空間狀態檢查
+        with st.expander("🗂️ 儲存空間狀態"):
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                if st.button("📊 快速檢查"):
+                    total, rfmta, timestamped = st.session_state.analyzer.check_drive_usage()
+            
+            with col2:
+                if st.button("🧹 快速清理"):
+                    deleted = st.session_state.analyzer.cleanup_old_sheets(keep_latest=5)
+                    if deleted > 0:
+                        st.success(f"清理了 {deleted} 個檔案")
+            
+            with col3:
+                st.info("💡 建議定期清理以節省空間")
         st.subheader("📈 RFMTA 分析結果")
         
         # 分析結果統計
