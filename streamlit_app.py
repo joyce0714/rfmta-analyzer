@@ -573,6 +573,7 @@ class SecureRFMTAAnalyzer:
                         row_data.append(value)
                     else:
                         row_data.append(str(value))
+                data_to_write.append(row_data)
             
             # 寫入數據
             worksheet.update(data_to_write)
