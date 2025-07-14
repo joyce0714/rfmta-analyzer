@@ -29,11 +29,15 @@ def check_authentication():
     if not st.session_state.authenticated:
         st.title("🔐 使用者認證")
         
-        # 從 secrets 讀取密碼
+        # 從 secrets 讀取密碼 - 改善異常處理
         try:
             correct_password = st.secrets["security"]["admin_password"]
-        except:
-            correct_password = "your_secure_password_here"  # 備用密碼
+        except KeyError:
+            st.error("未找到密碼配置，請聯繫管理員")
+            return False
+        except Exception as e:
+            st.error(f"讀取配置時發生錯誤: {str(e)}")
+            return False
         
         password = st.text_input("請輸入存取密碼", type="password")
         
@@ -48,9 +52,9 @@ def check_authentication():
         st.info("請聯繫管理員獲取存取密碼")
         return False
     
-    # 檢查 session 是否過期
+    # 修復 session 過期檢查 - 使用 total_seconds()
     if 'login_time' in st.session_state:
-        elapsed = (datetime.now() - st.session_state.login_time).seconds
+        elapsed = (datetime.now() - st.session_state.login_time).total_seconds()
         if elapsed > SESSION_TIMEOUT:
             st.session_state.authenticated = False
             st.error("Session 已過期，請重新登入")
@@ -141,47 +145,8 @@ class SecureRFMTAAnalyzer:
             return spreadsheet.url, sheet_name
             
         except Exception as e:
-            full_error = str(e)
-            
-            st.error(f"**🚨 完整錯誤訊息：** {full_error}")
-            
-            # 詳細錯誤分析
-            error_lower = full_error.lower()
-            
-            if "storage quota" in error_lower or "quota exceeded" in error_lower:
-                st.warning("📊 **診斷結果：** 這確實是儲存空間配額問題")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.info("""
-                    **💡 可能原因：**
-                    - 服務帳戶的 15GB 空間已滿
-                    - 有隱藏的大檔案佔用空間
-                    """)
-                
-                with col2:
-                    st.info("""
-                    **🛠️ 解決方案：**
-                    - 使用下方的詳細診斷功能
-                    - 檢查真正的空間使用情況
-                    """)
-                    
-            elif "quota" in error_lower:
-                st.warning("📋 **診斷結果：** 這可能是 API 配額問題，不是儲存空間")
-                st.info("這通常是每日 API 呼叫次數限制，明天會重置")
-                
-            elif "403" in error_lower or "forbidden" in error_lower:
-                st.warning("🔒 **診斷結果：** 這是權限問題")
-                st.info("服務帳戶可能沒有足夠的權限創建檔案")
-                
-            elif "401" in error_lower or "unauthorized" in error_lower:
-                st.warning("🔑 **診斷結果：** 這是認證問題")
-                st.info("服務帳戶憑證可能有問題")
-                
-            else:
-                st.warning("❓ **診斷結果：** 未知錯誤類型")
-                st.info("需要進一步診斷")
-            
+            st.error(f"創建 Google Sheet 時發生錯誤: {str(e)}")
+            st.info("💡 建議使用 '更新固定工作表' 模式")
             return None, None
     
     @staticmethod
@@ -291,11 +256,21 @@ class SecureRFMTAAnalyzer:
             total_amount_col = '實際付款金額'
             name_col = '姓名'
             
-            # 確保金額欄位被正確解析為數值
-            self.combined_data[total_amount_col] = pd.to_numeric(
+            # 改善金額欄位驗證和處理
+            amount_series = pd.to_numeric(
                 self.combined_data[total_amount_col], 
                 errors='coerce'
-            ).fillna(0)
+            )
+            
+            # 檢查並警告無效的金額數據
+            invalid_amount_count = amount_series.isna().sum()
+            if invalid_amount_count > 0:
+                st.warning(f"警告：有 {invalid_amount_count} 筆無效的金額數據將被排除")
+                # 移除無效金額的記錄而不是填充為0
+                self.combined_data = self.combined_data[amount_series.notna()]
+                amount_series = amount_series.dropna()
+            
+            self.combined_data[total_amount_col] = amount_series
             
             # 診斷日期解析問題
             date_na_count = self.combined_data[order_date_col].isna().sum()
@@ -335,18 +310,33 @@ class SecureRFMTAAnalyzer:
                 lambda x: (now - pd.to_datetime(x).date()).days if pd.notnull(x) else None
             )
             
-            # R 分層
-            rfmt['R'], self.r_bins = pd.qcut(
-                rfmt['Recency'],
-                q=4,
-                labels=False,
-                retbins=True,
-                duplicates='drop'
-            )
-            
-            num_labels = len(np.unique(rfmt['R'].dropna()))
-            rfmt['R'] = num_labels - rfmt['R']
-            rfmt['R'] = rfmt['R'].fillna(-1).astype(int)
+            # 修復 R 分層邏輯
+            valid_recency = rfmt['Recency'].dropna()
+            if len(valid_recency) > 0:
+                rfmt_temp, self.r_bins = pd.qcut(
+                    valid_recency,
+                    q=4,
+                    labels=False,
+                    retbins=True,
+                    duplicates='drop'
+                )
+                
+                # 確保 R 值在有效範圍內 (1-4)
+                num_labels = len(np.unique(rfmt_temp))
+                r_mapping = dict(zip(sorted(np.unique(rfmt_temp)), range(1, num_labels + 1)))
+                
+                # 對所有客戶分配 R 值
+                rfmt['R'] = rfmt['Recency'].apply(
+                    lambda x: pd.cut([x], bins=self.r_bins, labels=False, include_lowest=True)[0] if pd.notnull(x) else None
+                )
+                
+                # 反轉 R 值（較小的 Recency 天數應該得到較高的 R 分數）
+                rfmt['R'] = rfmt['R'].map(lambda x: num_labels - x if pd.notnull(x) else None)
+                rfmt['R'] = rfmt['R'].fillna(-1).astype(int)
+            else:
+                # 如果沒有有效的 Recency 數據，給所有客戶 R=1
+                rfmt['R'] = 1
+                self.r_bins = [0, float('inf')]
             
             # 檢查無效 R 值
             r_neg1_count = (rfmt['R'] == -1).sum()
@@ -521,10 +511,9 @@ class SecureRFMTAAnalyzer:
             st.error(f"準備匯出資料時發生錯誤: {str(e)}")
             return None
 
-    def create_or_update_google_sheet(self, export_df, sheet_title="RFMTA_Dashboard"):
-        """更新固定的 Google Sheet，適合 Looker Studio 連接"""
+    def update_existing_google_sheet(self, export_df, sheet_name):
+        """更新現有的 Google Sheet（使用者預先創建並分享）"""
         try:
-            # 使用 Streamlit secrets 中的憑證
             credentials_dict = st.secrets["google_credentials"]
             credentials = Credentials.from_service_account_info(
                 credentials_dict,
@@ -534,31 +523,32 @@ class SecureRFMTAAnalyzer:
             
             client = gspread.authorize(credentials)
             
-            # 固定的工作表名稱
-            fixed_sheet_name = sheet_title
-            
             try:
-                # 嘗試開啟現有的工作表
-                spreadsheet = client.open(fixed_sheet_name)
-                st.info(f"✅ 找到現有工作表：{fixed_sheet_name}")
+                # 嘗試開啟現有工作表
+                spreadsheet = client.open(sheet_name)
+                st.success(f"✅ 找到工作表：{sheet_name}")
                 
             except gspread.SpreadsheetNotFound:
-                # 如果工作表不存在，創建新的
-                spreadsheet = client.create(fixed_sheet_name)
-                spreadsheet.share(None, perm_type='anyone', role='writer')
-                st.success(f"🆕 創建新工作表：{fixed_sheet_name}")
+                st.error(f"❌ 找不到工作表：{sheet_name}")
+                st.info(f"""
+                **📋 請確認：**
+                1. 工作表名稱完全一致
+                2. 已分享給服務帳戶：`{credentials_dict.get('client_email', '服務帳戶')}`
+                3. 權限設定為「編輯者」
+                """)
+                return None, None
             
-            # 選擇第一個工作表
+            # 選擇要更新的工作表
             worksheet = spreadsheet.sheet1
             
             # 清空現有數據
             worksheet.clear()
-            st.info("🧹 清空舊數據...")
+            st.info("🧹 已清空現有數據")
             
             # 準備新數據
             data_to_write = []
             
-            # 添加分析時間戳記到第一行
+            # 添加更新時間
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             data_to_write.append([f"最後更新時間: {timestamp}"])
             data_to_write.append([])  # 空行
@@ -580,7 +570,7 @@ class SecureRFMTAAnalyzer:
                         row_data.append(str(value))
                 data_to_write.append(row_data)
             
-            # 一次性寫入所有資料
+            # 寫入數據
             worksheet.update(data_to_write)
             st.success("📊 數據更新完成！")
             
@@ -599,860 +589,11 @@ class SecureRFMTAAnalyzer:
             # 自動調整欄寬
             worksheet.columns_auto_resize(0, len(headers)-1)
             
-            return spreadsheet.url, fixed_sheet_name
+            return spreadsheet.url, sheet_name
             
         except Exception as e:
-            st.error(f"更新 Google Sheet 時發生錯誤: {str(e)}")
+            st.error(f"更新工作表時發生錯誤: {str(e)}")
             return None, None
-    
-    def create_or_update_google_sheet_with_history(self, export_df, sheet_title="RFMTA_Dashboard"):
-        """更新固定 Google Sheet，同時保留歷史記錄"""
-        try:
-            credentials_dict = st.secrets["google_credentials"]
-            credentials = Credentials.from_service_account_info(
-                credentials_dict,
-                scopes=['https://spreadsheets.google.com/feeds', 
-                       'https://www.googleapis.com/auth/drive']
-            )
-            
-            client = gspread.authorize(credentials)
-            fixed_sheet_name = sheet_title
-            
-            try:
-                spreadsheet = client.open(fixed_sheet_name)
-                st.info(f"✅ 找到現有工作表：{fixed_sheet_name}")
-            except gspread.SpreadsheetNotFound:
-                spreadsheet = client.create(fixed_sheet_name)
-                spreadsheet.share(None, perm_type='anyone', role='writer')
-                st.success(f"🆕 創建新工作表：{fixed_sheet_name}")
-            
-            # 確保有需要的工作表分頁
-            worksheet_names = [ws.title for ws in spreadsheet.worksheets()]
-            
-            # 主要數據工作表（供 Looker Studio 使用）
-            if "最新數據" not in worksheet_names:
-                main_worksheet = spreadsheet.add_worksheet(title="最新數據", rows=1000, cols=50)
-            else:
-                main_worksheet = spreadsheet.worksheet("最新數據")
-            
-            # 歷史記錄工作表
-            if "歷史記錄" not in worksheet_names:
-                history_worksheet = spreadsheet.add_worksheet(title="歷史記錄", rows=10000, cols=10)
-            else:
-                history_worksheet = spreadsheet.worksheet("歷史記錄")
-            
-            # === 更新主要數據工作表 ===
-            main_worksheet.clear()
-            
-            # 準備主要數據
-            data_to_write = []
-            headers = list(export_df.columns)
-            data_to_write.append(headers)
-            
-            for _, row in export_df.iterrows():
-                row_data = []
-                for col in headers:
-                    value = row[col]
-                    if pd.isna(value):
-                        row_data.append("")
-                    elif isinstance(value, (int, float)):
-                        row_data.append(value)
-                    else:
-                        row_data.append(str(value))
-                data_to_write.append(row_data)
-            
-            main_worksheet.update(data_to_write)
-            
-            # 格式化主要數據工作表
-            main_worksheet.format("1:1", {
-                "backgroundColor": {"red": 0.2, "green": 0.6, "blue": 0.9},
-                "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}
-            })
-            
-            # === 更新歷史記錄 ===
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            customer_count = len(export_df)
-            total_revenue = export_df['Monetary'].sum() if 'Monetary' in export_df.columns else 0
-            
-            # 獲取現有歷史記錄
-            try:
-                existing_history = history_worksheet.get_all_records()
-            except:
-                existing_history = []
-                # 添加標題行
-                history_worksheet.update("A1:E1", [["分析時間", "客戶數量", "總收入", "平均客單價", "備註"]])
-            
-            # 添加新記錄
-            avg_revenue = total_revenue / customer_count if customer_count > 0 else 0
-            new_record = [timestamp, customer_count, f"${total_revenue:.0f}", f"${avg_revenue:.0f}", "自動分析"]
-            
-            # 找到下一個空行
-            next_row = len(existing_history) + 2  # +2 因為有標題行且從1開始計數
-            history_worksheet.update(f"A{next_row}:E{next_row}", [new_record])
-            
-            st.success("📊 主要數據和歷史記錄都已更新！")
-            
-            return spreadsheet.url, fixed_sheet_name
-            
-        except Exception as e:
-            st.error(f"更新 Google Sheet 時發生錯誤: {str(e)}")
-            return None, None
-
-    def check_all_drive_files(self):
-        """檢查所有 Google Drive 檔案的詳細資訊"""
-        try:
-            credentials_dict = st.secrets["google_credentials"]
-            credentials = Credentials.from_service_account_info(
-                credentials_dict,
-                scopes=['https://spreadsheets.google.com/feeds', 
-                       'https://www.googleapis.com/auth/drive']
-            )
-            
-            client = gspread.authorize(credentials)
-            
-            # 取得所有檔案清單
-            all_files = client.list_spreadsheet_files()
-            
-            st.write(f"**📋 所有檔案清單（共 {len(all_files)} 個）：**")
-            
-            total_size_info = []
-            
-            for i, file_info in enumerate(all_files, 1):
-                name = file_info.get('name', '未知檔案')
-                file_id = file_info.get('id', '')
-                created_time = file_info.get('createdTime', '未知時間')
-                
-                # 顯示檔案資訊
-                st.write(f"""
-                **檔案 {i}：**
-                - 📄 名稱：`{name}`
-                - 🕐 建立時間：{created_time}
-                - 🆔 ID：`{file_id[:20]}...`
-                """)
-                
-                total_size_info.append({
-                    'name': name,
-                    'id': file_id,
-                    'created_time': created_time
-                })
-            
-            return total_size_info
-            
-        except Exception as e:
-            st.error(f"檢查檔案時發生錯誤: {str(e)}")
-            return []
-
-    def cleanup_all_sheets(self, exclude_keywords=None):
-        """清理所有工作表（謹慎使用）"""
-        if exclude_keywords is None:
-            exclude_keywords = ['RFMTA_Dashboard', 'important', 'keep', '重要']
-        
-        try:
-            credentials_dict = st.secrets["google_credentials"]
-            credentials = Credentials.from_service_account_info(
-                credentials_dict,
-                scopes=['https://spreadsheets.google.com/feeds', 
-                       'https://www.googleapis.com/auth/drive']
-            )
-            
-            client = gspread.authorize(credentials)
-            all_files = client.list_spreadsheet_files()
-            
-            files_to_delete = []
-            files_to_keep = []
-            
-            for file_info in all_files:
-                name = file_info.get('name', '')
-                should_keep = False
-                
-                # 檢查是否包含要保留的關鍵字
-                for keyword in exclude_keywords:
-                    if keyword.lower() in name.lower():
-                        should_keep = True
-                        break
-                
-                if should_keep:
-                    files_to_keep.append(name)
-                else:
-                    files_to_delete.append(file_info)
-            
-            st.write(f"**📋 將保留的檔案（{len(files_to_keep)} 個）：**")
-            for name in files_to_keep:
-                st.write(f"- ✅ {name}")
-            
-            st.write(f"**🗑️ 將刪除的檔案（{len(files_to_delete)} 個）：**")
-            for file_info in files_to_delete:
-                st.write(f"- ❌ {file_info.get('name', '未知')}")
-            
-            return len(files_to_delete), files_to_delete
-            
-        except Exception as e:
-            st.error(f"檢查清理檔案時發生錯誤: {str(e)}")
-            return 0, []
-
-    def emergency_cleanup(self, confirm_delete=False):
-        """緊急清理（刪除所有非重要檔案）"""
-        try:
-            if not confirm_delete:
-                st.warning("⚠️ 這是緊急清理功能，會刪除大部分檔案！")
-                return 0
-            
-            credentials_dict = st.secrets["google_credentials"]
-            credentials = Credentials.from_service_account_info(
-                credentials_dict,
-                scopes=['https://spreadsheets.google.com/feeds', 
-                       'https://www.googleapis.com/auth/drive']
-            )
-            
-            client = gspread.authorize(credentials)
-            all_files = client.list_spreadsheet_files()
-            
-            # 保留清單（重要檔案不刪除）
-            keep_keywords = ['RFMTA_Dashboard', 'Dashboard', 'important', 'keep', '重要']
-            
-            deleted_count = 0
-            
-            for file_info in all_files:
-                name = file_info.get('name', '')
-                file_id = file_info.get('id', '')
-                
-                # 檢查是否要保留
-                should_keep = False
-                for keyword in keep_keywords:
-                    if keyword.lower() in name.lower():
-                        should_keep = True
-                        break
-                
-                if not should_keep:
-                    try:
-                        client.del_spreadsheet(file_id)
-                        deleted_count += 1
-                        st.info(f"🗑️ 已刪除：{name}")
-                    except Exception as e:
-                        st.warning(f"❌ 無法刪除 {name}: {str(e)}")
-            
-            st.success(f"🎉 緊急清理完成！刪除了 {deleted_count} 個檔案")
-            return deleted_count
-            
-        except Exception as e:
-            st.error(f"緊急清理失敗: {str(e)}")
-            return 0
-
-
-    def check_owned_vs_accessible_files(self):
-        """區分擁有的檔案 vs 可存取的檔案"""
-        try:
-            import importlib
-            
-            # 檢查是否有 googleapiclient
-            try:
-                from googleapiclient.discovery import build
-            except ImportError:
-                st.error("需要安裝 google-api-python-client 套件")
-                st.info("請在 requirements.txt 中添加：google-api-python-client")
-                return [], []
-            
-            credentials_dict = st.secrets["google_credentials"]
-            credentials = Credentials.from_service_account_info(
-                credentials_dict,
-                scopes=['https://spreadsheets.google.com/feeds', 
-                       'https://www.googleapis.com/auth/drive']
-            )
-            
-            drive_service = build('drive', 'v3', credentials=credentials)
-            
-            # 只查詢服務帳戶擁有的檔案
-            owned_query = "'me' in owners and mimeType='application/vnd.google-apps.spreadsheet'"
-            owned_response = drive_service.files().list(
-                q=owned_query,
-                fields="files(id,name,createdTime,size)"
-            ).execute()
-            
-            # 查詢所有可存取的檔案
-            accessible_query = "mimeType='application/vnd.google-apps.spreadsheet'"
-            accessible_response = drive_service.files().list(
-                q=accessible_query,
-                fields="files(id,name,createdTime,size,owners)"
-            ).execute()
-            
-            owned_files = owned_response.get('files', [])
-            accessible_files = accessible_response.get('files', [])
-            
-            st.write(f"""
-            **📊 檔案權限詳細分析：**
-            - 🏠 **服務帳戶擁有的檔案：** {len(owned_files)} 個
-            - 👀 **可存取的檔案（包含分享）：** {len(accessible_files)} 個
-            - 📋 **差異：** {len(accessible_files) - len(owned_files)} 個是分享檔案
-            """)
-            
-            if owned_files:
-                st.write("**🏠 服務帳戶擁有的檔案清單：**")
-                for i, file_info in enumerate(owned_files, 1):
-                    name = file_info.get('name', '未知')
-                    size = file_info.get('size', '0')
-                    size_mb = int(size) / (1024 * 1024) if size.isdigit() else 0
-                    created = file_info.get('createdTime', '未知')
-                    
-                    st.write(f"  {i}. 📄 **{name}** ({size_mb:.1f} MB) - {created[:10]}")
-            
-            if len(accessible_files) > len(owned_files):
-                st.write("**👀 分享給服務帳戶的檔案（部分清單）：**")
-                shared_files = [f for f in accessible_files if f['id'] not in [o['id'] for o in owned_files]]
-                for i, file_info in enumerate(shared_files[:5], 1):
-                    name = file_info.get('name', '未知')
-                    owners = file_info.get('owners', [])
-                    owner_name = owners[0].get('displayName', '未知') if owners else '未知'
-                    st.write(f"  {i}. 📄 **{name}** (擁有者: {owner_name})")
-                
-                if len(shared_files) > 5:
-                    st.write(f"  ... 還有 {len(shared_files) - 5} 個分享檔案")
-            
-            return owned_files, accessible_files
-            
-        except Exception as e:
-            st.error(f"權限分析失敗: {str(e)}")
-            return [], []
-
-    def check_actual_storage_usage(self):
-        """檢查真正的儲存空間使用情況"""
-        try:
-            from googleapiclient.discovery import build
-            
-            credentials_dict = st.secrets["google_credentials"]
-            credentials = Credentials.from_service_account_info(
-                credentials_dict,
-                scopes=['https://www.googleapis.com/auth/drive']
-            )
-            
-            drive_service = build('drive', 'v3', credentials=credentials)
-            
-            # 獲取儲存空間資訊
-            about = drive_service.about().get(fields='storageQuota,user').execute()
-            storage = about.get('storageQuota', {})
-            user = about.get('user', {})
-            
-            limit = int(storage.get('limit', 0)) if storage.get('limit') else 0
-            usage = int(storage.get('usage', 0)) if storage.get('usage') else 0
-            usage_in_drive = int(storage.get('usageInDrive', 0)) if storage.get('usageInDrive') else 0
-            
-            if limit > 0:
-                usage_percent = (usage / limit) * 100
-                
-                st.success(f"""
-                **💾 服務帳戶真正的儲存空間狀況：**
-                - 👤 **帳戶：** {user.get('displayName', '服務帳戶')}
-                - 🔵 **已使用：** {usage / (1024**3):.2f} GB
-                - 📁 **Drive 使用：** {usage_in_drive / (1024**3):.2f} GB
-                - 🔘 **總限額：** {limit / (1024**3):.2f} GB  
-                - 📊 **使用率：** {usage_percent:.1f}%
-                - 💡 **剩餘空間：** {(limit - usage) / (1024**3):.2f} GB
-                """)
-                
-                if usage_percent > 95:
-                    st.error("⚠️ 儲存空間幾乎已滿！")
-                elif usage_percent > 80:
-                    st.warning("⚠️ 儲存空間使用率較高")
-                else:
-                    st.success("✅ 儲存空間充足")
-                    
-            else:
-                st.warning("無法獲取儲存空間限制資訊，可能是無限空間或權限不足")
-            
-            return usage, limit
-            
-        except Exception as e:
-            st.error(f"無法獲取儲存空間資訊: {str(e)}")
-            st.info("這可能是因為服務帳戶權限不足或 API 限制")
-            return 0, 0
-
-    def comprehensive_diagnosis(self):
-        """綜合診斷函數"""
-        st.subheader("🔍 綜合診斷報告")
-        
-        # 1. 檢查儲存空間
-        st.write("**1️⃣ 檢查儲存空間使用情況...**")
-        usage, limit = self.check_actual_storage_usage()
-        
-        st.markdown("---")
-        
-        # 2. 檢查檔案權限
-        st.write("**2️⃣ 分析檔案權限...**")
-        owned_files, accessible_files = self.check_owned_vs_accessible_files()
-        
-        st.markdown("---")
-        
-        # 3. 綜合建議
-        st.write("**3️⃣ 綜合建議：**")
-        
-        if limit > 0 and usage > 0:
-            usage_percent = (usage / limit) * 100
-            
-            if usage_percent > 95:
-                st.error("""
-                **🚨 確認問題：儲存空間已滿**
-                - 需要立即清理服務帳戶的檔案
-                - 建議使用 "更新固定工作表" 模式
-                """)
-            elif len(owned_files) == 0:
-                st.success("""
-                **✅ 好消息：服務帳戶沒有自己的檔案**
-                - 儲存空間問題可能是暫時的
-                - 建議重試創建工作表
-                """)
-            else:
-                st.info(f"""
-                **📊 診斷結果：**
-                - 服務帳戶擁有 {len(owned_files)} 個檔案
-                - 儲存空間使用率 {usage_percent:.1f}%
-                - 建議清理不需要的檔案
-                """)
-        else:
-            st.warning("""
-            **❓ 無法確定儲存空間狀況**
-            - 可能是 API 權限問題
-            - 建議嘗試 "更新固定工作表" 模式
-            """)
-
-    def detailed_storage_diagnosis(self):
-        """詳細的儲存空間診斷"""
-        try:
-            from googleapiclient.discovery import build
-            
-            credentials_dict = st.secrets["google_credentials"]
-            credentials = Credentials.from_service_account_info(
-                credentials_dict,
-                scopes=['https://www.googleapis.com/auth/drive', 
-                       'https://www.googleapis.com/auth/drive.metadata.readonly']
-            )
-            
-            drive_service = build('drive', 'v3', credentials=credentials)
-            
-            # 1. 嘗試獲取完整的帳戶資訊
-            st.write("**🔍 Step 1: 獲取帳戶基本資訊**")
-            try:
-                about = drive_service.about().get(
-                    fields='user,storageQuota,kind,appInstalled'
-                ).execute()
-                
-                user_info = about.get('user', {})
-                storage_info = about.get('storageQuota', {})
-                
-                st.success(f"""
-                **👤 帳戶資訊：**
-                - 顯示名稱：{user_info.get('displayName', '未知')}
-                - Email：{user_info.get('emailAddress', '未知')}
-                - 帳戶類型：{about.get('kind', '未知')}
-                """)
-                
-                st.info(f"""
-                **💾 儲存空間原始資訊：**
-                - limit: {storage_info.get('limit', '無')}
-                - usage: {storage_info.get('usage', '無')}
-                - usageInDrive: {storage_info.get('usageInDrive', '無')}
-                - usageInDriveTrash: {storage_info.get('usageInDriveTrash', '無')}
-                """)
-                
-            except Exception as e:
-                st.error(f"獲取帳戶資訊失敗：{str(e)}")
-            
-            # 2. 嘗試創建一個測試檔案來確認空間狀況
-            st.write("**🧪 Step 2: 測試創建小檔案**")
-            try:
-                # 嘗試創建一個很小的測試檔案
-                import io
-                
-                # 創建一個 1KB 的測試檔案
-                test_content = "Test file for storage diagnosis\n" * 50
-                test_file = io.StringIO(test_content)
-                
-                file_metadata = {
-                    'name': f'Storage_Test_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
-                }
-                
-                # 上傳測試檔案
-                media = drive_service.files().create(
-                    body=file_metadata,
-                    media_body=test_content.encode()
-                ).execute()
-                
-                st.success("✅ 成功創建測試檔案！這表示儲存空間沒有問題")
-                
-                # 立即刪除測試檔案
-                drive_service.files().delete(fileId=media['id']).execute()
-                st.info("🗑️ 已清理測試檔案")
-                
-                return "storage_available"
-                
-            except Exception as e:
-                error_msg = str(e).lower()
-                
-                if "quota" in error_msg or "storage" in error_msg:
-                    st.error("❌ 確認：儲存空間確實已滿")
-                    return "storage_full"
-                else:
-                    st.warning(f"⚠️ 創建測試檔案失敗：{str(e)}")
-                    return "unknown_error"
-            
-            # 3. 檢查現有檔案的大小
-            st.write("**📊 Step 3: 計算現有檔案大小**")
-            try:
-                files_response = drive_service.files().list(
-                    q="'me' in owners",
-                    fields="files(id,name,size,mimeType,createdTime)"
-                ).execute()
-                
-                files = files_response.get('files', [])
-                total_size = 0
-                
-                for file_info in files:
-                    size = file_info.get('size')
-                    if size and size.isdigit():
-                        total_size += int(size)
-                
-                total_size_gb = total_size / (1024**3)
-                
-                st.info(f"""
-                **📁 服務帳戶擁有的檔案統計：**
-                - 檔案數量：{len(files)}
-                - 總大小：{total_size_gb:.2f} GB
-                """)
-                
-                if len(files) > 0:
-                    st.write("**前 5 個檔案：**")
-                    for i, file_info in enumerate(files[:5], 1):
-                        name = file_info.get('name', '未知')
-                        size = file_info.get('size', '0')
-                        size_mb = int(size) / (1024 * 1024) if size and size.isdigit() else 0
-                        mime_type = file_info.get('mimeType', '未知')
-                        
-                        st.write(f"  {i}. **{name}** ({size_mb:.1f} MB) - {mime_type}")
-                
-                return "diagnosis_complete"
-                
-            except Exception as e:
-                st.error(f"檢查檔案大小失敗：{str(e)}")
-                return "file_check_failed"
-                
-        except Exception as e:
-            st.error(f"診斷過程失敗：{str(e)}")
-            return "diagnosis_failed"
-    
-    def test_sheet_creation_directly(self):
-        """直接測試工作表創建"""
-        st.write("**🧪 直接測試 Google Sheets 創建**")
-        
-        try:
-            credentials_dict = st.secrets["google_credentials"]
-            credentials = Credentials.from_service_account_info(
-                credentials_dict,
-                scopes=['https://spreadsheets.google.com/feeds', 
-                       'https://www.googleapis.com/auth/drive']
-            )
-            
-            client = gspread.authorize(credentials)
-            
-            # 嘗試創建一個很小的測試工作表
-            test_name = f"Storage_Test_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            
-            st.info(f"🧪 嘗試創建測試工作表：{test_name}")
-            
-            spreadsheet = client.create(test_name)
-            worksheet = spreadsheet.sheet1
-            
-            # 寫入一些測試資料
-            worksheet.update('A1:B2', [['Test', 'Data'], ['Success', 'True']])
-            
-            st.success("✅ 測試工作表創建成功！")
-            st.success(f"📋 測試工作表連結：{spreadsheet.url}")
-            
-            # 詢問是否要刪除測試工作表
-            st.warning("⚠️ 是否要刪除這個測試工作表？")
-            
-            return spreadsheet.id, spreadsheet.url
-            
-        except Exception as e:
-            error_msg = str(e)
-            st.error(f"❌ 測試工作表創建失敗：{error_msg}")
-            
-            # 詳細錯誤分析
-            if "quota" in error_msg.lower():
-                st.error("🔍 **確認原因：** 配額限制（可能是儲存空間或 API 配額）")
-            elif "permission" in error_msg.lower() or "403" in error_msg:
-                st.error("🔍 **確認原因：** 權限不足")
-            elif "401" in error_msg:
-                st.error("🔍 **確認原因：** 認證問題")
-            else:
-                st.error(f"🔍 **確認原因：** 其他錯誤 - {error_msg}")
-            
-            return None, None
-
-
-    def fixed_storage_test(self):
-        """修正後的儲存空間測試"""
-        try:
-            from googleapiclient.discovery import build
-            from googleapiclient.http import MediaIoBaseUpload
-            import io
-            
-            credentials_dict = st.secrets["google_credentials"]
-            credentials = Credentials.from_service_account_info(
-                credentials_dict,
-                scopes=['https://www.googleapis.com/auth/drive']
-            )
-            
-            drive_service = build('drive', 'v3', credentials=credentials)
-            
-            st.write("**🧪 修正後的檔案創建測試**")
-            
-            # 創建測試內容
-            test_content = "Storage test file\nCreated for RFMTA diagnosis"
-            file_stream = io.BytesIO(test_content.encode('utf-8'))
-            
-            # 正確的媒體上傳格式
-            media = MediaIoBaseUpload(
-                file_stream, 
-                mimetype='text/plain',
-                resumable=True
-            )
-            
-            file_metadata = {
-                'name': f'RFMTA_Storage_Test_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt'
-            }
-            
-            # 嘗試上傳
-            file_result = drive_service.files().create(
-                body=file_metadata,
-                media_body=media
-            ).execute()
-            
-            file_id = file_result.get('id')
-            
-            st.success("✅ 檔案創建測試成功！")
-            st.info(f"📄 測試檔案 ID: {file_id}")
-            
-            # 立即刪除測試檔案
-            drive_service.files().delete(fileId=file_id).execute()
-            st.success("🗑️ 測試檔案已清理")
-            
-            return "success"
-            
-        except Exception as e:
-            error_msg = str(e)
-            st.error(f"❌ 修正後的測試仍然失敗：{error_msg}")
-            
-            # 分析錯誤類型
-            if "quota" in error_msg.lower() or "storage" in error_msg.lower():
-                st.error("🔍 確認：這是配額或儲存問題")
-            elif "403" in error_msg:
-                st.error("🔍 確認：這是權限問題")
-            elif "401" in error_msg:
-                st.error("🔍 確認：這是認證問題")
-            else:
-                st.warning(f"🔍 其他錯誤：{error_msg}")
-            
-            return "failed"
-    
-    def direct_sheets_test(self):
-        """直接測試 Google Sheets 創建（最簡化版本）"""
-        st.write("**📝 直接測試 Google Sheets 創建**")
-        
-        try:
-            credentials_dict = st.secrets["google_credentials"]
-            credentials = Credentials.from_service_account_info(
-                credentials_dict,
-                scopes=['https://spreadsheets.google.com/feeds', 
-                       'https://www.googleapis.com/auth/drive']
-            )
-            
-            client = gspread.authorize(credentials)
-            
-            # 使用最簡單的名稱
-            test_name = f"Test_{datetime.now().strftime('%H%M%S')}"
-            
-            st.info(f"🧪 創建測試工作表：{test_name}")
-            
-            # 嘗試創建最簡單的工作表
-            spreadsheet = client.create(test_name)
-            
-            st.success("🎉 Google Sheets 創建成功！")
-            st.success(f"📋 URL: {spreadsheet.url}")
-            
-            # 嘗試寫入一個簡單的值
-            worksheet = spreadsheet.sheet1
-            worksheet.update('A1', 'Test Success')
-            
-            st.success("✅ 數據寫入也成功！")
-            
-            return spreadsheet.id, spreadsheet.url, "success"
-            
-        except Exception as e:
-            error_msg = str(e)
-            st.error(f"❌ Google Sheets 創建失敗：{error_msg}")
-            
-            # 詳細錯誤分析
-            if "storage quota has been exceeded" in error_msg.lower():
-                st.error("🔍 **確定原因：** Drive 儲存空間已滿")
-                st.info("但根據前面診斷，limit=0 表示應該沒有限制...")
-                
-            elif "quota" in error_msg.lower():
-                st.error("🔍 **確定原因：** 某種配額限制")
-                
-            elif "403" in error_msg and "forbidden" in error_msg.lower():
-                st.error("🔍 **確定原因：** 權限被拒絕")
-                st.info("服務帳戶可能沒有創建檔案的權限")
-                
-            elif "401" in error_msg:
-                st.error("🔍 **確定原因：** 認證失敗")
-                
-            else:
-                st.warning(f"🔍 **其他錯誤：** {error_msg}")
-            
-            return None, None, "failed"
-    
-    def analyze_permissions(self):
-        """分析服務帳戶權限"""
-        st.write("**🔒 分析服務帳戶權限**")
-        
-        try:
-            credentials_dict = st.secrets["google_credentials"]
-            
-            # 檢查憑證內容
-            st.info(f"""
-            **🔑 服務帳戶憑證資訊：**
-            - Project ID: {credentials_dict.get('project_id', '未知')}
-            - Client Email: {credentials_dict.get('client_email', '未知')}
-            - Type: {credentials_dict.get('type', '未知')}
-            """)
-            
-            # 檢查 scopes
-            credentials = Credentials.from_service_account_info(
-                credentials_dict,
-                scopes=['https://spreadsheets.google.com/feeds', 
-                       'https://www.googleapis.com/auth/drive']
-            )
-            
-            st.success("✅ 憑證載入成功")
-            
-            # 嘗試檢查權限
-            from googleapiclient.discovery import build
-            
-            drive_service = build('drive', 'v3', credentials=credentials)
-            
-            # 測試基本權限
-            about = drive_service.about().get(fields='user').execute()
-            user_email = about.get('user', {}).get('emailAddress', '')
-            
-            st.success(f"✅ Drive API 存取成功 - {user_email}")
-            
-            # 測試 Sheets API
-            sheets_service = build('sheets', 'v4', credentials=credentials)
-            
-            st.success("✅ Sheets API 初始化成功")
-            
-            return "permissions_ok"
-            
-        except Exception as e:
-            st.error(f"❌ 權限檢查失敗：{str(e)}")
-            return "permissions_failed"
-
-    def cleanup_old_sheets(self, keep_latest=5):
-        """清理舊的 RFMTA 分析工作表，保留最新的幾個"""
-        try:
-            # 使用 Streamlit secrets 中的憑證
-            credentials_dict = st.secrets["google_credentials"]
-            credentials = Credentials.from_service_account_info(
-                credentials_dict,
-                scopes=['https://spreadsheets.google.com/feeds', 
-                       'https://www.googleapis.com/auth/drive']
-            )
-            
-            client = gspread.authorize(credentials)
-            
-            # 取得所有工作表
-            all_sheets = client.list_spreadsheet_files()
-            
-            # 篩選出 RFMTA 相關的工作表（帶時間戳記的）
-            rfmta_sheets = []
-            for sheet in all_sheets:
-                name = sheet.get('name', '')
-                # 找出帶時間戳記的工作表，但保留固定名稱的工作表
-                if 'RFMTA' in name and ('_202' in name or '_201' in name):  # 帶年份時間戳記的
-                    rfmta_sheets.append({
-                        'id': sheet['id'],
-                        'name': name,
-                        'createdTime': sheet.get('createdTime', '')
-                    })
-            
-            st.info(f"找到 {len(rfmta_sheets)} 個帶時間戳記的 RFMTA 工作表")
-            
-            # 按創建時間排序（最新的在前）
-            rfmta_sheets.sort(key=lambda x: x['createdTime'], reverse=True)
-            
-            # 刪除多餘的舊工作表
-            deleted_count = 0
-            if len(rfmta_sheets) > keep_latest:
-                sheets_to_delete = rfmta_sheets[keep_latest:]
-                
-                for sheet in sheets_to_delete:
-                    try:
-                        # 刪除工作表
-                        spreadsheet = client.open_by_key(sheet['id'])
-                        client.del_spreadsheet(sheet['id'])
-                        deleted_count += 1
-                        st.info(f"✅ 已刪除: {sheet['name']}")
-                    except Exception as e:
-                        st.warning(f"❌ 無法刪除 {sheet['name']}: {str(e)}")
-            
-            if deleted_count > 0:
-                st.success(f"🎉 清理完成！已刪除 {deleted_count} 個舊工作表，保留最新 {keep_latest} 個")
-            else:
-                st.info("✨ 沒有需要清理的舊工作表")
-                
-            return deleted_count
-            
-        except Exception as e:
-            st.error(f"清理過程中發生錯誤: {str(e)}")
-            return 0
-
-    def check_drive_usage(self):
-        """檢查 Google Drive 使用情況"""
-        try:
-            credentials_dict = st.secrets["google_credentials"]
-            credentials = Credentials.from_service_account_info(
-                credentials_dict,
-                scopes=['https://spreadsheets.google.com/feeds', 
-                       'https://www.googleapis.com/auth/drive']
-            )
-            
-            client = gspread.authorize(credentials)
-            
-            # 取得所有檔案清單
-            all_files = client.list_spreadsheet_files()
-            
-            total_files = len(all_files)
-            rfmta_files = sum(1 for f in all_files if 'RFMTA' in f.get('name', ''))
-            rfmta_timestamped = sum(1 for f in all_files 
-                                  if 'RFMTA' in f.get('name', '') and ('_202' in f.get('name', '') or '_201' in f.get('name', '')))
-            
-            st.info(f"""
-            **📊 Google Drive 使用情況：**
-            - 📁 總檔案數：{total_files}
-            - 📋 RFMTA 相關檔案：{rfmta_files}
-            - 🕐 帶時間戳記的檔案：{rfmta_timestamped}
-            """)
-            
-            # 顯示最近的檔案
-            rfmta_recent = [f for f in all_files if 'RFMTA' in f.get('name', '')][:5]
-            if rfmta_recent:
-                st.write("**📋 最近的 RFMTA 檔案：**")
-                for f in rfmta_recent:
-                    st.write(f"- {f.get('name', '未知')}")
-            
-            return total_files, rfmta_files, rfmta_timestamped
-            
-        except Exception as e:
-            st.warning(f"無法檢查 Drive 使用情況: {str(e)}")
-            return 0, 0, 0
 
 
 # Streamlit 應用程式主體
@@ -1498,102 +639,6 @@ def main():
         else:
             st.sidebar.error("請輸入工作表名稱")
     
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🗂️ Drive 管理")
-    
-    # 基本檢查
-    if st.sidebar.button("📊 檢查儲存空間"):
-        with st.spinner("檢查中..."):
-            total_files, rfmta_files, timestamped_files = st.session_state.analyzer.check_drive_usage()
-    
-    # 詳細檢查
-    if st.sidebar.button("🔍 查看所有檔案"):
-        with st.spinner("檢查所有檔案中..."):
-            all_files_info = st.session_state.analyzer.check_all_drive_files()
-
-
-    if st.sidebar.button("🧪 詳細儲存診斷"):
-        with st.spinner("執行詳細診斷..."):
-            result = st.session_state.analyzer.detailed_storage_diagnosis()
-    
-    if st.sidebar.button("📝 測試工作表創建"):
-        with st.spinner("測試創建工作表..."):
-            test_id, test_url = st.session_state.analyzer.test_sheet_creation_directly()
-            if test_id:
-                if st.sidebar.button("🗑️ 刪除測試工作表"):
-                    # 可以在這裡添加刪除邏輯
-                    st.sidebar.success("測試工作表已刪除")
-
-    # 在側邊欄診斷區域添加：
-
-    st.sidebar.markdown("**🔧 修正後的測試：**")
-    
-    if st.sidebar.button("🧪 修正檔案測試"):
-        with st.spinner("執行修正後的檔案測試..."):
-            result = st.session_state.analyzer.fixed_storage_test()
-    
-    if st.sidebar.button("📝 直接測試 Sheets"):
-        with st.spinner("直接測試 Google Sheets 創建..."):
-            test_id, test_url, result = st.session_state.analyzer.direct_sheets_test()
-            if result == "success":
-                st.sidebar.success("✅ Sheets 創建成功！")
-    
-    if st.sidebar.button("🔒 檢查權限"):
-        with st.spinner("檢查服務帳戶權限..."):
-            perm_result = st.session_state.analyzer.analyze_permissions()
-    
-    # 綜合診斷
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🔍 問題診斷")
-    
-    if st.sidebar.button("🩺 執行綜合診斷"):
-        with st.spinner("執行全面診斷中..."):
-            st.session_state.analyzer.comprehensive_diagnosis()
-    
-    if st.sidebar.button("💾 檢查真實儲存空間"):
-        with st.spinner("檢查儲存空間..."):
-            usage, limit = st.session_state.analyzer.check_actual_storage_usage()
-    
-    if st.sidebar.button("📋 分析檔案權限"):
-        with st.spinner("分析檔案權限..."):
-            owned, accessible = st.session_state.analyzer.check_owned_vs_accessible_files()
-    
-    # 分析清理選項
-    if st.sidebar.button("📊 分析清理選項"):
-        with st.spinner("分析中..."):
-            count_to_delete, files_to_delete = st.session_state.analyzer.cleanup_all_sheets()
-            if count_to_delete > 0:
-                st.sidebar.info(f"可以清理 {count_to_delete} 個檔案")
-    
-    # 原本的 RFMTA 清理（保留）
-    st.sidebar.write("**RFMTA 檔案清理：**")
-    keep_count = st.sidebar.selectbox("保留最新幾個檔案", [3, 5, 10, 15], index=1)
-    
-    if st.sidebar.button("🧹 清理 RFMTA 檔案"):
-        with st.spinner("清理中..."):
-            deleted_count = st.session_state.analyzer.cleanup_old_sheets(keep_latest=keep_count)
-            if deleted_count > 0:
-                st.sidebar.success(f"✅ 已清理 {deleted_count} 個 RFMTA 檔案")
-    
-    # 緊急清理選項
-    st.sidebar.markdown("---")
-    st.sidebar.write("**⚠️ 緊急清理選項：**")
-    emergency_confirm = st.sidebar.checkbox("我了解風險，確認緊急清理")
-    
-    if st.sidebar.button("🚨 執行緊急清理", type="secondary") and emergency_confirm:
-        with st.spinner("緊急清理中，請稍候..."):
-            deleted_count = st.session_state.analyzer.emergency_cleanup(confirm_delete=True)
-            if deleted_count > 0:
-                st.sidebar.success(f"✅ 緊急清理完成！清理了 {deleted_count} 個檔案")
-                st.sidebar.info("💡 現在可以創建新工作表了！")
-    
-    # 使用說明
-    st.sidebar.info("""
-    💡 **建議步驟：**
-    1. 先點「🔍 查看所有檔案」
-    2. 再點「📊 分析清理選項」  
-    3. 確認後執行緊急清理
-    """)
     
     # 主要內容區域
     if st.session_state.analyzer.combined_data is not None:
@@ -1629,22 +674,6 @@ def main():
     
     # 顯示分析結果
     if st.session_state.analyzer.rfmt_result is not None:
-        # 添加空間狀態檢查
-        with st.expander("🗂️ 儲存空間狀態"):
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                if st.button("📊 快速檢查"):
-                    total, rfmta, timestamped = st.session_state.analyzer.check_drive_usage()
-            
-            with col2:
-                if st.button("🧹 快速清理"):
-                    deleted = st.session_state.analyzer.cleanup_old_sheets(keep_latest=5)
-                    if deleted > 0:
-                        st.success(f"清理了 {deleted} 個檔案")
-            
-            with col3:
-                st.info("💡 建議定期清理以節省空間")
         st.subheader("📈 RFMTA 分析結果")
         
         # 分析結果統計
@@ -1671,80 +700,88 @@ def main():
         
         # 創建/更新 Google Sheet 輸出
         st.subheader("📊 更新 RFMTA Dashboard")
+
+        # 添加簡短說明
+        st.info("""
+        💡 **使用說明：** 請確認你已經創建 Google Sheet 並分享給服務帳戶。每次執行都會自動更新數據。
+        """)
         
-        # 選擇更新模式
-        update_mode = st.radio(
-            "選擇更新模式",
-            options=["更新固定工作表（推薦給 Looker Studio）", "創建新工作表（含時間戳記）"],
-            help="固定工作表模式適合連接 Looker Studio，數據會自動更新"
+        
+        # 固定工作表設定
+        sheet_name = st.text_input(
+            "Google Sheet 名稱", 
+            value="RFMTA_Dashboard", 
+            help="請輸入你已經創建並分享給服務帳戶的 Google Sheet 名稱"
         )
         
-        # 工作表名稱設定
-        if update_mode == "更新固定工作表（推薦給 Looker Studio）":
-            sheet_name = st.text_input("固定工作表名稱", value="RFMTA_Dashboard", 
-                                      help="這個名稱將固定使用，每次分析會更新相同工作表")
-            button_text = "🔄 更新 Dashboard"
-            button_help = "更新固定工作表中的數據，適合 Looker Studio 自動同步"
-        else:
-            sheet_name = st.text_input("工作表名稱", value="RFMTA_Analysis")
-            button_text = "📝 創建新工作表"
-            button_help = "創建包含時間戳記的新工作表"
+        button_text = "🔄 更新 RFMTA Dashboard"
+        button_help = "更新 Google Sheet 中的數據，Looker Studio 會自動同步"
         
         # 執行按鈕
         if st.button(button_text, type="primary", help=button_help):
-            with st.spinner("正在創建 Google Sheet..."):
+            with st.spinner("正在更新 Google Sheet..."):
                 export_data = st.session_state.analyzer.get_export_data()
                 
                 if export_data is not None:
-                    if update_mode == "更新固定工作表（推薦給 Looker Studio）":
-                        # 使用固定工作表更新模式
-                        sheet_url, final_sheet_name = st.session_state.analyzer.create_or_update_google_sheet_with_history(
-                            export_data, 
-                            sanitize_input(sheet_name)
-                        )
+                    # 直接更新指定的工作表
+                    sheet_url, final_sheet_name = st.session_state.analyzer.update_existing_google_sheet(
+                        export_data, 
+                        sanitize_input(sheet_name)
+                    )
+                    
+                    if sheet_url:
+                        st.success("✅ RFMTA Dashboard 更新成功！")
+                        st.markdown(f"**📋 工作表名稱:** {final_sheet_name}")
+                        st.markdown(f"**🔗 [點擊開啟 RFMTA Dashboard]({sheet_url})**")
                         
-                        if sheet_url:
-                            st.success("✅ Dashboard 更新成功！")
-                            st.markdown(f"**📋 工作表名稱:** {final_sheet_name}")
-                            st.markdown(f"**🔗 [點擊開啟 RFMTA Dashboard]({sheet_url})**")
+                        # Looker Studio 連接指引
+                        with st.expander("📊 如何連接到 Looker Studio"):
+                            st.markdown(f"""
+                            **步驟 1:** 前往 [Looker Studio](https://lookerstudio.google.com/)
                             
-                            # Looker Studio 連接指引
-                            with st.expander("📊 如何連接到 Looker Studio"):
-                                st.markdown(f"""
-                                **步驟 1:** 前往 [Looker Studio](https://lookerstudio.google.com/)
-                                
-                                **步驟 2:** 點擊 "建立" → "資料來源"
-                                
-                                **步驟 3:** 選擇 "Google 試算表"
-                                
-                                **步驟 4:** 選擇工作表：`{final_sheet_name}`
-                                
-                                **步驟 5:** 選擇工作表分頁：`最新數據`
-                                
-                                **步驟 6:** 點擊 "建立報表"
-                                
-                                🎯 **好處:** 每次你更新分析，Looker Studio 會自動同步最新數據！
-                                """)
+                            **步驟 2:** 點擊 "建立" → "資料來源"
                             
-                            # 分享指引
-                            st.info("""
-                            **Dashboard 使用說明:**
-                            - 📊 **最新數據** 分頁：供 Looker Studio 連接使用
-                            - 📈 **歷史記錄** 分頁：記錄每次分析的摘要資訊
-                            - 🔄 每次分析會自動更新數據，無需手動操作
+                            **步驟 3:** 選擇 "Google 試算表"
+                            
+                            **步驟 4:** 選擇工作表：`{final_sheet_name}`
+                            
+                            **步驟 5:** 點擊 "建立報表"
+                            
+                            🎯 **好處:** 每次你更新分析，Looker Studio 會自動同步最新數據！
                             """)
-                            
-                    else:
-                        # 使用原本的創建新工作表模式
-                        sheet_url, final_sheet_name = st.session_state.analyzer.create_google_sheet_output(
-                            export_data, 
-                            sanitize_input(sheet_name)
-                        )
                         
-                        if sheet_url:
-                            st.success("✅ 新工作表創建成功！")
-                            st.markdown(f"**📋 工作表名稱:** {final_sheet_name}")
-                            st.markdown(f"**🔗 [點擊開啟 Google Sheet]({sheet_url})**")
+                        # 使用說明
+                        st.info("""
+                        **📊 使用說明:**
+                        - 🔄 每次執行分析都會自動更新此工作表
+                        - 📈 可以在 Looker Studio 中建立視覺化圖表  
+                        - 🔗 建議將工作表連結加入瀏覽器書籤
+                        - ⏰ 工作表會顯示最後更新時間
+                        """)
+                        
+                    else:
+                        # 顯示設定指引
+                        st.error("❌ 找不到指定的工作表")
+                        
+                        with st.expander("📋 設定指引", expanded=True):
+                            service_email = st.secrets["google_credentials"]["client_email"]
+                            
+                            st.markdown(f"""
+                            **🔧 請確認以下設定：**
+                            
+                            **1. 工作表名稱完全一致**
+                            - 你輸入的名稱：`{sanitize_input(sheet_name)}`
+                            - 確認 Google Sheet 的名稱完全相同（包含大小寫）
+                            
+                            **2. 分享設定正確**
+                            - 在 Google Sheet 中點擊右上角「分享」
+                            - 輸入服務帳戶 email：`{service_email}`
+                            - 權限設定為：「編輯者」
+                            - 點擊「傳送」
+                            
+                            **3. 重新嘗試**
+                            - 確認上述設定後，重新點擊「🔄 更新 RFMTA Dashboard」
+                            """)
                     
                     
                         
