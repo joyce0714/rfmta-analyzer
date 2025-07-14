@@ -9,6 +9,7 @@ import json
 from io import BytesIO
 import hashlib
 import os
+from datetime import datetime, timezone, timedelta
 
 # 安全配置
 ALLOWED_USERS = ["user1@company.com", "user2@company.com"]  # 允許的使用者清單
@@ -422,7 +423,7 @@ class SecureRFMTAAnalyzer:
                 export_df = export_df.rename(columns={'Name': '姓名'})
             
             # 基本輸出欄位
-            base_columns = ['Email', '姓名', 'Recency', 'Frequency', 'Monetary', 'Times', 'Average',
+            base_columns = ['Email', '姓名', '手機', 'Recency', 'Frequency', 'Monetary', 'Times', 'Average',
                            'R', 'F', 'M', 'T', 'A', 'RFMTA_Score']
             
             # 確保所有基本欄位都存在
@@ -549,7 +550,9 @@ class SecureRFMTAAnalyzer:
             data_to_write = []
             
             # 添加更新時間
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            from datetime import timezone, timedelta
+            taipei_tz = timezone(timedelta(hours=8))
+            timestamp = datetime.now(taipei_tz).strftime("%Y-%m-%d %H:%M:%S")
             data_to_write.append([f"最後更新時間: {timestamp}"])
             data_to_write.append([])  # 空行
             
@@ -564,11 +567,12 @@ class SecureRFMTAAnalyzer:
                     value = row[col]
                     if pd.isna(value):
                         row_data.append("")
+                    elif col == 'Monetary':
+                        row_data.append(f"'{value}")  # 加單引號避免被誤判為日期
                     elif isinstance(value, (int, float)):
-                        row_data.append(value)  # 保持數值格式
+                        row_data.append(value)
                     else:
                         row_data.append(str(value))
-                data_to_write.append(row_data)
             
             # 寫入數據
             worksheet.update(data_to_write)
