@@ -1186,6 +1186,175 @@ class SecureRFMTAAnalyzer:
             
             return None, None
 
+
+    def fixed_storage_test(self):
+        """修正後的儲存空間測試"""
+        try:
+            from googleapiclient.discovery import build
+            from googleapiclient.http import MediaIoBaseUpload
+            import io
+            
+            credentials_dict = st.secrets["google_credentials"]
+            credentials = Credentials.from_service_account_info(
+                credentials_dict,
+                scopes=['https://www.googleapis.com/auth/drive']
+            )
+            
+            drive_service = build('drive', 'v3', credentials=credentials)
+            
+            st.write("**🧪 修正後的檔案創建測試**")
+            
+            # 創建測試內容
+            test_content = "Storage test file\nCreated for RFMTA diagnosis"
+            file_stream = io.BytesIO(test_content.encode('utf-8'))
+            
+            # 正確的媒體上傳格式
+            media = MediaIoBaseUpload(
+                file_stream, 
+                mimetype='text/plain',
+                resumable=True
+            )
+            
+            file_metadata = {
+                'name': f'RFMTA_Storage_Test_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt'
+            }
+            
+            # 嘗試上傳
+            file_result = drive_service.files().create(
+                body=file_metadata,
+                media_body=media
+            ).execute()
+            
+            file_id = file_result.get('id')
+            
+            st.success("✅ 檔案創建測試成功！")
+            st.info(f"📄 測試檔案 ID: {file_id}")
+            
+            # 立即刪除測試檔案
+            drive_service.files().delete(fileId=file_id).execute()
+            st.success("🗑️ 測試檔案已清理")
+            
+            return "success"
+            
+        except Exception as e:
+            error_msg = str(e)
+            st.error(f"❌ 修正後的測試仍然失敗：{error_msg}")
+            
+            # 分析錯誤類型
+            if "quota" in error_msg.lower() or "storage" in error_msg.lower():
+                st.error("🔍 確認：這是配額或儲存問題")
+            elif "403" in error_msg:
+                st.error("🔍 確認：這是權限問題")
+            elif "401" in error_msg:
+                st.error("🔍 確認：這是認證問題")
+            else:
+                st.warning(f"🔍 其他錯誤：{error_msg}")
+            
+            return "failed"
+    
+    def direct_sheets_test(self):
+        """直接測試 Google Sheets 創建（最簡化版本）"""
+        st.write("**📝 直接測試 Google Sheets 創建**")
+        
+        try:
+            credentials_dict = st.secrets["google_credentials"]
+            credentials = Credentials.from_service_account_info(
+                credentials_dict,
+                scopes=['https://spreadsheets.google.com/feeds', 
+                       'https://www.googleapis.com/auth/drive']
+            )
+            
+            client = gspread.authorize(credentials)
+            
+            # 使用最簡單的名稱
+            test_name = f"Test_{datetime.now().strftime('%H%M%S')}"
+            
+            st.info(f"🧪 創建測試工作表：{test_name}")
+            
+            # 嘗試創建最簡單的工作表
+            spreadsheet = client.create(test_name)
+            
+            st.success("🎉 Google Sheets 創建成功！")
+            st.success(f"📋 URL: {spreadsheet.url}")
+            
+            # 嘗試寫入一個簡單的值
+            worksheet = spreadsheet.sheet1
+            worksheet.update('A1', 'Test Success')
+            
+            st.success("✅ 數據寫入也成功！")
+            
+            return spreadsheet.id, spreadsheet.url, "success"
+            
+        except Exception as e:
+            error_msg = str(e)
+            st.error(f"❌ Google Sheets 創建失敗：{error_msg}")
+            
+            # 詳細錯誤分析
+            if "storage quota has been exceeded" in error_msg.lower():
+                st.error("🔍 **確定原因：** Drive 儲存空間已滿")
+                st.info("但根據前面診斷，limit=0 表示應該沒有限制...")
+                
+            elif "quota" in error_msg.lower():
+                st.error("🔍 **確定原因：** 某種配額限制")
+                
+            elif "403" in error_msg and "forbidden" in error_msg.lower():
+                st.error("🔍 **確定原因：** 權限被拒絕")
+                st.info("服務帳戶可能沒有創建檔案的權限")
+                
+            elif "401" in error_msg:
+                st.error("🔍 **確定原因：** 認證失敗")
+                
+            else:
+                st.warning(f"🔍 **其他錯誤：** {error_msg}")
+            
+            return None, None, "failed"
+    
+    def analyze_permissions(self):
+        """分析服務帳戶權限"""
+        st.write("**🔒 分析服務帳戶權限**")
+        
+        try:
+            credentials_dict = st.secrets["google_credentials"]
+            
+            # 檢查憑證內容
+            st.info(f"""
+            **🔑 服務帳戶憑證資訊：**
+            - Project ID: {credentials_dict.get('project_id', '未知')}
+            - Client Email: {credentials_dict.get('client_email', '未知')}
+            - Type: {credentials_dict.get('type', '未知')}
+            """)
+            
+            # 檢查 scopes
+            credentials = Credentials.from_service_account_info(
+                credentials_dict,
+                scopes=['https://spreadsheets.google.com/feeds', 
+                       'https://www.googleapis.com/auth/drive']
+            )
+            
+            st.success("✅ 憑證載入成功")
+            
+            # 嘗試檢查權限
+            from googleapiclient.discovery import build
+            
+            drive_service = build('drive', 'v3', credentials=credentials)
+            
+            # 測試基本權限
+            about = drive_service.about().get(fields='user').execute()
+            user_email = about.get('user', {}).get('emailAddress', '')
+            
+            st.success(f"✅ Drive API 存取成功 - {user_email}")
+            
+            # 測試 Sheets API
+            sheets_service = build('sheets', 'v4', credentials=credentials)
+            
+            st.success("✅ Sheets API 初始化成功")
+            
+            return "permissions_ok"
+            
+        except Exception as e:
+            st.error(f"❌ 權限檢查失敗：{str(e)}")
+            return "permissions_failed"
+
     def cleanup_old_sheets(self, keep_latest=5):
         """清理舊的 RFMTA 分析工作表，保留最新的幾個"""
         try:
@@ -1342,7 +1511,6 @@ def main():
         with st.spinner("檢查所有檔案中..."):
             all_files_info = st.session_state.analyzer.check_all_drive_files()
 
-    # 在現有的診斷按鈕後面添加：
 
     if st.sidebar.button("🧪 詳細儲存診斷"):
         with st.spinner("執行詳細診斷..."):
@@ -1355,6 +1523,24 @@ def main():
                 if st.sidebar.button("🗑️ 刪除測試工作表"):
                     # 可以在這裡添加刪除邏輯
                     st.sidebar.success("測試工作表已刪除")
+
+    # 在側邊欄診斷區域添加：
+
+    st.sidebar.markdown("**🔧 修正後的測試：**")
+    
+    if st.sidebar.button("🧪 修正檔案測試"):
+        with st.spinner("執行修正後的檔案測試..."):
+            result = st.session_state.analyzer.fixed_storage_test()
+    
+    if st.sidebar.button("📝 直接測試 Sheets"):
+        with st.spinner("直接測試 Google Sheets 創建..."):
+            test_id, test_url, result = st.session_state.analyzer.direct_sheets_test()
+            if result == "success":
+                st.sidebar.success("✅ Sheets 創建成功！")
+    
+    if st.sidebar.button("🔒 檢查權限"):
+        with st.spinner("檢查服務帳戶權限..."):
+            perm_result = st.session_state.analyzer.analyze_permissions()
     
     # 綜合診斷
     st.sidebar.markdown("---")
