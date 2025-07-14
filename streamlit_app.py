@@ -681,6 +681,146 @@ class SecureRFMTAAnalyzer:
             st.error(f"更新 Google Sheet 時發生錯誤: {str(e)}")
             return None, None
 
+    def check_all_drive_files(self):
+        """檢查所有 Google Drive 檔案的詳細資訊"""
+        try:
+            credentials_dict = st.secrets["google_credentials"]
+            credentials = Credentials.from_service_account_info(
+                credentials_dict,
+                scopes=['https://spreadsheets.google.com/feeds', 
+                       'https://www.googleapis.com/auth/drive']
+            )
+            
+            client = gspread.authorize(credentials)
+            
+            # 取得所有檔案清單
+            all_files = client.list_spreadsheet_files()
+            
+            st.write(f"**📋 所有檔案清單（共 {len(all_files)} 個）：**")
+            
+            total_size_info = []
+            
+            for i, file_info in enumerate(all_files, 1):
+                name = file_info.get('name', '未知檔案')
+                file_id = file_info.get('id', '')
+                created_time = file_info.get('createdTime', '未知時間')
+                
+                # 顯示檔案資訊
+                st.write(f"""
+                **檔案 {i}：**
+                - 📄 名稱：`{name}`
+                - 🕐 建立時間：{created_time}
+                - 🆔 ID：`{file_id[:20]}...`
+                """)
+                
+                total_size_info.append({
+                    'name': name,
+                    'id': file_id,
+                    'created_time': created_time
+                })
+            
+            return total_size_info
+            
+        except Exception as e:
+            st.error(f"檢查檔案時發生錯誤: {str(e)}")
+            return []
+
+    def cleanup_all_sheets(self, exclude_keywords=None):
+        """清理所有工作表（謹慎使用）"""
+        if exclude_keywords is None:
+            exclude_keywords = ['RFMTA_Dashboard', 'important', 'keep', '重要']
+        
+        try:
+            credentials_dict = st.secrets["google_credentials"]
+            credentials = Credentials.from_service_account_info(
+                credentials_dict,
+                scopes=['https://spreadsheets.google.com/feeds', 
+                       'https://www.googleapis.com/auth/drive']
+            )
+            
+            client = gspread.authorize(credentials)
+            all_files = client.list_spreadsheet_files()
+            
+            files_to_delete = []
+            files_to_keep = []
+            
+            for file_info in all_files:
+                name = file_info.get('name', '')
+                should_keep = False
+                
+                # 檢查是否包含要保留的關鍵字
+                for keyword in exclude_keywords:
+                    if keyword.lower() in name.lower():
+                        should_keep = True
+                        break
+                
+                if should_keep:
+                    files_to_keep.append(name)
+                else:
+                    files_to_delete.append(file_info)
+            
+            st.write(f"**📋 將保留的檔案（{len(files_to_keep)} 個）：**")
+            for name in files_to_keep:
+                st.write(f"- ✅ {name}")
+            
+            st.write(f"**🗑️ 將刪除的檔案（{len(files_to_delete)} 個）：**")
+            for file_info in files_to_delete:
+                st.write(f"- ❌ {file_info.get('name', '未知')}")
+            
+            return len(files_to_delete), files_to_delete
+            
+        except Exception as e:
+            st.error(f"檢查清理檔案時發生錯誤: {str(e)}")
+            return 0, []
+
+    def emergency_cleanup(self, confirm_delete=False):
+        """緊急清理（刪除所有非重要檔案）"""
+        try:
+            if not confirm_delete:
+                st.warning("⚠️ 這是緊急清理功能，會刪除大部分檔案！")
+                return 0
+            
+            credentials_dict = st.secrets["google_credentials"]
+            credentials = Credentials.from_service_account_info(
+                credentials_dict,
+                scopes=['https://spreadsheets.google.com/feeds', 
+                       'https://www.googleapis.com/auth/drive']
+            )
+            
+            client = gspread.authorize(credentials)
+            all_files = client.list_spreadsheet_files()
+            
+            # 保留清單（重要檔案不刪除）
+            keep_keywords = ['RFMTA_Dashboard', 'Dashboard', 'important', 'keep', '重要']
+            
+            deleted_count = 0
+            
+            for file_info in all_files:
+                name = file_info.get('name', '')
+                file_id = file_info.get('id', '')
+                
+                # 檢查是否要保留
+                should_keep = False
+                for keyword in keep_keywords:
+                    if keyword.lower() in name.lower():
+                        should_keep = True
+                        break
+                
+                if not should_keep:
+                    try:
+                        client.del_spreadsheet(file_id)
+                        deleted_count += 1
+                        st.info(f"🗑️ 已刪除：{name}")
+                    except Exception as e:
+                        st.warning(f"❌ 無法刪除 {name}: {str(e)}")
+            
+            st.success(f"🎉 緊急清理完成！刪除了 {deleted_count} 個檔案")
+            return deleted_count
+            
+        except Exception as e:
+            st.error(f"緊急清理失敗: {str(e)}")
+            return 0
+
     def cleanup_old_sheets(self, keep_latest=5):
         """清理舊的 RFMTA 分析工作表，保留最新的幾個"""
         try:
@@ -823,33 +963,56 @@ def main():
                     st.rerun()
         else:
             st.sidebar.error("請輸入工作表名稱")
-    # 添加以下內容：
+    
     st.sidebar.markdown("---")
     st.sidebar.subheader("🗂️ Drive 管理")
     
-    # 檢查 Drive 使用情況
+    # 基本檢查
     if st.sidebar.button("📊 檢查儲存空間"):
         with st.spinner("檢查中..."):
             total_files, rfmta_files, timestamped_files = st.session_state.analyzer.check_drive_usage()
     
-    # 清理選項
-    st.sidebar.write("**清理選項：**")
+    # 詳細檢查
+    if st.sidebar.button("🔍 查看所有檔案"):
+        with st.spinner("檢查所有檔案中..."):
+            all_files_info = st.session_state.analyzer.check_all_drive_files()
+    
+    # 分析清理選項
+    if st.sidebar.button("📊 分析清理選項"):
+        with st.spinner("分析中..."):
+            count_to_delete, files_to_delete = st.session_state.analyzer.cleanup_all_sheets()
+            if count_to_delete > 0:
+                st.sidebar.info(f"可以清理 {count_to_delete} 個檔案")
+    
+    # 原本的 RFMTA 清理（保留）
+    st.sidebar.write("**RFMTA 檔案清理：**")
     keep_count = st.sidebar.selectbox("保留最新幾個檔案", [3, 5, 10, 15], index=1)
     
-    if st.sidebar.button("🧹 清理舊工作表"):
-        if st.sidebar.button("確認清理", type="secondary"):
-            with st.spinner("清理中，請稍候..."):
-                deleted_count = st.session_state.analyzer.cleanup_old_sheets(keep_latest=keep_count)
-                if deleted_count > 0:
-                    st.sidebar.success(f"✅ 已清理 {deleted_count} 個檔案")
-                    st.sidebar.info("💡 現在可以創建新工作表了！")
-    
-    # 緊急清理（如果遇到空間問題）
-    if st.sidebar.button("🚨 緊急清理（僅保留3個）", type="secondary"):
-        with st.spinner("緊急清理中..."):
-            deleted_count = st.session_state.analyzer.cleanup_old_sheets(keep_latest=2)
+    if st.sidebar.button("🧹 清理 RFMTA 檔案"):
+        with st.spinner("清理中..."):
+            deleted_count = st.session_state.analyzer.cleanup_old_sheets(keep_latest=keep_count)
             if deleted_count > 0:
-                st.sidebar.success(f"✅ 緊急清理完成！刪除了 {deleted_count} 個檔案")
+                st.sidebar.success(f"✅ 已清理 {deleted_count} 個 RFMTA 檔案")
+    
+    # 緊急清理選項
+    st.sidebar.markdown("---")
+    st.sidebar.write("**⚠️ 緊急清理選項：**")
+    emergency_confirm = st.sidebar.checkbox("我了解風險，確認緊急清理")
+    
+    if st.sidebar.button("🚨 執行緊急清理", type="secondary") and emergency_confirm:
+        with st.spinner("緊急清理中，請稍候..."):
+            deleted_count = st.session_state.analyzer.emergency_cleanup(confirm_delete=True)
+            if deleted_count > 0:
+                st.sidebar.success(f"✅ 緊急清理完成！清理了 {deleted_count} 個檔案")
+                st.sidebar.info("💡 現在可以創建新工作表了！")
+    
+    # 使用說明
+    st.sidebar.info("""
+    💡 **建議步驟：**
+    1. 先點「🔍 查看所有檔案」
+    2. 再點「📊 分析清理選項」  
+    3. 確認後執行緊急清理
+    """)
     
     # 主要內容區域
     if st.session_state.analyzer.combined_data is not None:
