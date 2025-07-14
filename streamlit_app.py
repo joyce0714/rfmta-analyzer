@@ -350,6 +350,19 @@ class SecureRFMTAAnalyzer:
             rfmt['Times'] = total_times.set_index('Email')['total_times']
             rfmt['Average'] = rfmt['Monetary'] / rfmt['Times']
             rfmt['Name'] = name_selection_df.set_index('Email')['preferred_name']
+            # 提取手機號碼（選擇最新的手機號碼）
+            phone_selection = []
+            for email, group in latest_orders.groupby('Email'):
+                if '手機' in group.columns and not group['手機'].isna().all():
+                    phone_value = group['手機'].dropna().iloc[0] if not group['手機'].dropna().empty else ""
+                else:
+                    phone_value = ""
+                phone_selection.append((email, phone_value))
+            
+            phone_selection_df = pd.DataFrame(phone_selection, columns=['Email', 'preferred_phone'])
+            rfmt['手機'] = phone_selection_df.set_index('Email')['preferred_phone']
+            # 除錯：檢查手機資料
+            st.info(f"手機資料統計：共 {len(phone_selection_df)} 筆，有手機號碼的 {len(phone_selection_df[phone_selection_df['preferred_phone'] != ''])} 筆")
 
             # ============ 修改的 F 計算邏輯開始 ============
             # F 的固定分級：1作品=F1, 2作品=F2, 3作品=F3, 4+作品=F4
