@@ -141,29 +141,46 @@ class SecureRFMTAAnalyzer:
             return spreadsheet.url, sheet_name
             
         except Exception as e:
-            error_msg = str(e)
-            if "storage quota" in error_msg or "quota" in error_msg:
-                st.error("⚠️ Google Drive 儲存空間已滿！")
+            full_error = str(e)
+            
+            st.error(f"**🚨 完整錯誤訊息：** {full_error}")
+            
+            # 詳細錯誤分析
+            error_lower = full_error.lower()
+            
+            if "storage quota" in error_lower or "quota exceeded" in error_lower:
+                st.warning("📊 **診斷結果：** 這確實是儲存空間配額問題")
                 
                 col1, col2 = st.columns(2)
-                
                 with col1:
-                    st.markdown("""
-                    **💡 立即解決方案：**
-                    1. 選擇 "更新固定工作表" 模式
-                    2. 使用現有工作表名稱
-                    3. 這樣不會占用新空間
+                    st.info("""
+                    **💡 可能原因：**
+                    - 服務帳戶的 15GB 空間已滿
+                    - 有隱藏的大檔案佔用空間
                     """)
                 
                 with col2:
-                    st.markdown("""
-                    **🛠️ 長期解決方案：**
-                    1. 在左側點擊 "📊 檢查儲存空間"
-                    2. 然後點擊 "🧹 清理舊工作表"
-                    3. 或使用 "🚨 緊急清理"
+                    st.info("""
+                    **🛠️ 解決方案：**
+                    - 使用下方的詳細診斷功能
+                    - 檢查真正的空間使用情況
                     """)
+                    
+            elif "quota" in error_lower:
+                st.warning("📋 **診斷結果：** 這可能是 API 配額問題，不是儲存空間")
+                st.info("這通常是每日 API 呼叫次數限制，明天會重置")
+                
+            elif "403" in error_lower or "forbidden" in error_lower:
+                st.warning("🔒 **診斷結果：** 這是權限問題")
+                st.info("服務帳戶可能沒有足夠的權限創建檔案")
+                
+            elif "401" in error_lower or "unauthorized" in error_lower:
+                st.warning("🔑 **診斷結果：** 這是認證問題")
+                st.info("服務帳戶憑證可能有問題")
+                
             else:
-                st.error(f"創建 Google Sheet 時發生錯誤: {error_msg}")
+                st.warning("❓ **診斷結果：** 未知錯誤類型")
+                st.info("需要進一步診斷")
             
             return None, None
     
@@ -821,6 +838,181 @@ class SecureRFMTAAnalyzer:
             st.error(f"緊急清理失敗: {str(e)}")
             return 0
 
+
+    def check_owned_vs_accessible_files(self):
+        """區分擁有的檔案 vs 可存取的檔案"""
+        try:
+            import importlib
+            
+            # 檢查是否有 googleapiclient
+            try:
+                from googleapiclient.discovery import build
+            except ImportError:
+                st.error("需要安裝 google-api-python-client 套件")
+                st.info("請在 requirements.txt 中添加：google-api-python-client")
+                return [], []
+            
+            credentials_dict = st.secrets["google_credentials"]
+            credentials = Credentials.from_service_account_info(
+                credentials_dict,
+                scopes=['https://spreadsheets.google.com/feeds', 
+                       'https://www.googleapis.com/auth/drive']
+            )
+            
+            drive_service = build('drive', 'v3', credentials=credentials)
+            
+            # 只查詢服務帳戶擁有的檔案
+            owned_query = "'me' in owners and mimeType='application/vnd.google-apps.spreadsheet'"
+            owned_response = drive_service.files().list(
+                q=owned_query,
+                fields="files(id,name,createdTime,size)"
+            ).execute()
+            
+            # 查詢所有可存取的檔案
+            accessible_query = "mimeType='application/vnd.google-apps.spreadsheet'"
+            accessible_response = drive_service.files().list(
+                q=accessible_query,
+                fields="files(id,name,createdTime,size,owners)"
+            ).execute()
+            
+            owned_files = owned_response.get('files', [])
+            accessible_files = accessible_response.get('files', [])
+            
+            st.write(f"""
+            **📊 檔案權限詳細分析：**
+            - 🏠 **服務帳戶擁有的檔案：** {len(owned_files)} 個
+            - 👀 **可存取的檔案（包含分享）：** {len(accessible_files)} 個
+            - 📋 **差異：** {len(accessible_files) - len(owned_files)} 個是分享檔案
+            """)
+            
+            if owned_files:
+                st.write("**🏠 服務帳戶擁有的檔案清單：**")
+                for i, file_info in enumerate(owned_files, 1):
+                    name = file_info.get('name', '未知')
+                    size = file_info.get('size', '0')
+                    size_mb = int(size) / (1024 * 1024) if size.isdigit() else 0
+                    created = file_info.get('createdTime', '未知')
+                    
+                    st.write(f"  {i}. 📄 **{name}** ({size_mb:.1f} MB) - {created[:10]}")
+            
+            if len(accessible_files) > len(owned_files):
+                st.write("**👀 分享給服務帳戶的檔案（部分清單）：**")
+                shared_files = [f for f in accessible_files if f['id'] not in [o['id'] for o in owned_files]]
+                for i, file_info in enumerate(shared_files[:5], 1):
+                    name = file_info.get('name', '未知')
+                    owners = file_info.get('owners', [])
+                    owner_name = owners[0].get('displayName', '未知') if owners else '未知'
+                    st.write(f"  {i}. 📄 **{name}** (擁有者: {owner_name})")
+                
+                if len(shared_files) > 5:
+                    st.write(f"  ... 還有 {len(shared_files) - 5} 個分享檔案")
+            
+            return owned_files, accessible_files
+            
+        except Exception as e:
+            st.error(f"權限分析失敗: {str(e)}")
+            return [], []
+
+    def check_actual_storage_usage(self):
+        """檢查真正的儲存空間使用情況"""
+        try:
+            from googleapiclient.discovery import build
+            
+            credentials_dict = st.secrets["google_credentials"]
+            credentials = Credentials.from_service_account_info(
+                credentials_dict,
+                scopes=['https://www.googleapis.com/auth/drive']
+            )
+            
+            drive_service = build('drive', 'v3', credentials=credentials)
+            
+            # 獲取儲存空間資訊
+            about = drive_service.about().get(fields='storageQuota,user').execute()
+            storage = about.get('storageQuota', {})
+            user = about.get('user', {})
+            
+            limit = int(storage.get('limit', 0)) if storage.get('limit') else 0
+            usage = int(storage.get('usage', 0)) if storage.get('usage') else 0
+            usage_in_drive = int(storage.get('usageInDrive', 0)) if storage.get('usageInDrive') else 0
+            
+            if limit > 0:
+                usage_percent = (usage / limit) * 100
+                
+                st.success(f"""
+                **💾 服務帳戶真正的儲存空間狀況：**
+                - 👤 **帳戶：** {user.get('displayName', '服務帳戶')}
+                - 🔵 **已使用：** {usage / (1024**3):.2f} GB
+                - 📁 **Drive 使用：** {usage_in_drive / (1024**3):.2f} GB
+                - 🔘 **總限額：** {limit / (1024**3):.2f} GB  
+                - 📊 **使用率：** {usage_percent:.1f}%
+                - 💡 **剩餘空間：** {(limit - usage) / (1024**3):.2f} GB
+                """)
+                
+                if usage_percent > 95:
+                    st.error("⚠️ 儲存空間幾乎已滿！")
+                elif usage_percent > 80:
+                    st.warning("⚠️ 儲存空間使用率較高")
+                else:
+                    st.success("✅ 儲存空間充足")
+                    
+            else:
+                st.warning("無法獲取儲存空間限制資訊，可能是無限空間或權限不足")
+            
+            return usage, limit
+            
+        except Exception as e:
+            st.error(f"無法獲取儲存空間資訊: {str(e)}")
+            st.info("這可能是因為服務帳戶權限不足或 API 限制")
+            return 0, 0
+
+    def comprehensive_diagnosis(self):
+        """綜合診斷函數"""
+        st.subheader("🔍 綜合診斷報告")
+        
+        # 1. 檢查儲存空間
+        st.write("**1️⃣ 檢查儲存空間使用情況...**")
+        usage, limit = self.check_actual_storage_usage()
+        
+        st.markdown("---")
+        
+        # 2. 檢查檔案權限
+        st.write("**2️⃣ 分析檔案權限...**")
+        owned_files, accessible_files = self.check_owned_vs_accessible_files()
+        
+        st.markdown("---")
+        
+        # 3. 綜合建議
+        st.write("**3️⃣ 綜合建議：**")
+        
+        if limit > 0 and usage > 0:
+            usage_percent = (usage / limit) * 100
+            
+            if usage_percent > 95:
+                st.error("""
+                **🚨 確認問題：儲存空間已滿**
+                - 需要立即清理服務帳戶的檔案
+                - 建議使用 "更新固定工作表" 模式
+                """)
+            elif len(owned_files) == 0:
+                st.success("""
+                **✅ 好消息：服務帳戶沒有自己的檔案**
+                - 儲存空間問題可能是暫時的
+                - 建議重試創建工作表
+                """)
+            else:
+                st.info(f"""
+                **📊 診斷結果：**
+                - 服務帳戶擁有 {len(owned_files)} 個檔案
+                - 儲存空間使用率 {usage_percent:.1f}%
+                - 建議清理不需要的檔案
+                """)
+        else:
+            st.warning("""
+            **❓ 無法確定儲存空間狀況**
+            - 可能是 API 權限問題
+            - 建議嘗試 "更新固定工作表" 模式
+            """)
+
     def cleanup_old_sheets(self, keep_latest=5):
         """清理舊的 RFMTA 分析工作表，保留最新的幾個"""
         try:
@@ -976,6 +1168,22 @@ def main():
     if st.sidebar.button("🔍 查看所有檔案"):
         with st.spinner("檢查所有檔案中..."):
             all_files_info = st.session_state.analyzer.check_all_drive_files()
+
+    # 綜合診斷
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🔍 問題診斷")
+    
+    if st.sidebar.button("🩺 執行綜合診斷"):
+        with st.spinner("執行全面診斷中..."):
+            st.session_state.analyzer.comprehensive_diagnosis()
+    
+    if st.sidebar.button("💾 檢查真實儲存空間"):
+        with st.spinner("檢查儲存空間..."):
+            usage, limit = st.session_state.analyzer.check_actual_storage_usage()
+    
+    if st.sidebar.button("📋 分析檔案權限"):
+        with st.spinner("分析檔案權限..."):
+            owned, accessible = st.session_state.analyzer.check_owned_vs_accessible_files()
     
     # 分析清理選項
     if st.sidebar.button("📊 分析清理選項"):
