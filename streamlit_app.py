@@ -419,7 +419,7 @@ class SecureRFMTAAnalyzer:
             return False
     
     def get_export_data(self):
-        """準備匯出資料：動態列出所有讀取的工作表名稱"""
+        st.write("DEBUG: 正在使用最新版匯出邏輯...") # 加入這一行測試
         if self.rfmt_result is None:
             return None
         
