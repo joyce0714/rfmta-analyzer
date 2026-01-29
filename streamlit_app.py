@@ -419,102 +419,102 @@ class SecureRFMTAAnalyzer:
             return False
     
     def get_export_data(self):
-        """準備匯出資料"""
+        """準備匯出資料：動態列出所有讀取的工作表名稱"""
         if self.rfmt_result is None:
             return None
         
         try:
-            # 重新獲取完整資料進行匯出
-            # 由於我們保留了 frequency_by_sheet，可以重建需要的資訊
-            
-            # 基本的 RFMTA 結果
+            # 1. 複製基本的分析結果
             export_df = self.rfmt_result.copy()
             export_df = export_df.reset_index()
             
-            # 重新命名 Name 為 姓名
+            # 統一姓名欄位名稱
             if 'Name' in export_df.columns:
                 export_df = export_df.rename(columns={'Name': '姓名'})
             
-            # 基本輸出欄位
+            # 2. 定義基礎固定欄位
             base_columns = ['Email', '姓名', '手機', 'Recency', 'Frequency', 'Monetary', 'Times', 'Average',
                            'R', 'F', 'M', 'T', 'A', 'RFMTA_Score']
             
-            # 確保所有基本欄位都存在
+            # 確保基礎欄位存在
             for col in base_columns:
                 if col not in export_df.columns:
                     export_df[col] = ""
-            
-            # 作品參與次數欄位（從原始資料重建）
+
+            # 3. 【核心修改】動態獲取所有「工作表來源」並建立欄位
+            sheet_columns = []
             if hasattr(self, 'combined_data') and self.combined_data is not None:
-                sheet_columns = sorted(set(self.combined_data['SheetSource'].unique()))
+                # 自動抓取所有不重複的工作表名稱，並按字母排序
+                sheet_columns = sorted(self.combined_data['SheetSource'].unique().tolist())
                 
-                # 填充每個作品的參與次數
+                # 計算每個客戶在各個工作表出現的次數
                 for sheet in sheet_columns:
                     participation_counts = self.combined_data[
                         self.combined_data['SheetSource'] == sheet
                     ].groupby('Email').size()
+                    
+                    # 將次數填入對應的 Email，若沒參加則填 0
                     export_df[sheet] = export_df['Email'].map(participation_counts).fillna(0).astype(int)
-            else:
-                sheet_columns = []
             
-            # 準備邊界說明欄位
+            # 4. 準備邊界說明欄位 (R, F, M, T, A 分級標準)
             boundary_columns = []
             
-            # ============ R 的邊界說明 ============
+            # R 邊界
             if hasattr(self, 'r_bins') and self.r_bins is not None:
                 for i in range(len(self.r_bins)-1):
-                    idx = len(self.r_bins) - 2 - i  # 反轉索引
+                    idx = len(self.r_bins) - 2 - i
                     next_idx = idx + 1
-                    export_df[f'R{i+1}_Boundary'] = f"R{i+1}: {self.r_bins[idx]:.0f} to less than {self.r_bins[next_idx]:.0f} days"
-                    boundary_columns.append(f'R{i+1}_Boundary')
+                    col_name = f'R{i+1}_Boundary'
+                    export_df[col_name] = f"R{i+1}: {self.r_bins[idx]:.0f} to less than {self.r_bins[next_idx]:.0f} days"
+                    boundary_columns.append(col_name)
             
-            # ============ F 的邊界說明（修改後的固定分級）============
+            # F 邊界 (固定分級)
             f_boundary_descriptions = [
                 "F1: participated in 1 different work",
                 "F2: participated in 2 different works", 
                 "F3: participated in 3 different works",
                 "F4: participated in 4 or more different works"
             ]
-            
             for i, description in enumerate(f_boundary_descriptions):
-                export_df[f'F{i+1}_Boundary'] = description
-                boundary_columns.append(f'F{i+1}_Boundary')
+                col_name = f'F{i+1}_Boundary'
+                export_df[col_name] = description
+                boundary_columns.append(col_name)
             
-            # ============ M 的邊界說明 ============
+            # M 邊界
             if hasattr(self, 'm_bins') and self.m_bins is not None:
                 for i in range(len(self.m_bins)-1):
+                    col_name = f'M{i+1}_Boundary'
                     if i == len(self.m_bins)-2:
-                        export_df[f'M{i+1}_Boundary'] = f"M{i+1}: ${self.m_bins[i]:.0f} and above"
+                        export_df[col_name] = f"M{i+1}: ${self.m_bins[i]:.0f} and above"
                     else:
-                        next_value = self.m_bins[i+1]
-                        export_df[f'M{i+1}_Boundary'] = f"M{i+1}: ${self.m_bins[i]:.0f} to less than ${next_value:.0f}"
-                    boundary_columns.append(f'M{i+1}_Boundary')
+                        export_df[col_name] = f"M{i+1}: ${self.m_bins[i]:.0f} to less than ${self.m_bins[i+1]:.0f}"
+                    boundary_columns.append(col_name)
             
-            # ============ T 的邊界說明 ============
+            # T 邊界
             if hasattr(self, 't_bins') and self.t_bins is not None:
                 for i in range(len(self.t_bins)-1):
+                    col_name = f'T{i+1}_Boundary'
                     if i == len(self.t_bins)-2:
-                        export_df[f'T{i+1}_Boundary'] = f"T{i+1}: {int(self.t_bins[i])} times or more in total"
+                        export_df[col_name] = f"T{i+1}: {int(self.t_bins[i])} times or more in total"
                     else:
-                        current_value = int(self.t_bins[i]) + 1 if i > 0 else int(self.t_bins[i])
-                        next_value = int(self.t_bins[i+1])
-                        export_df[f'T{i+1}_Boundary'] = f"T{i+1}: {current_value} to {next_value} times in total"
-                    boundary_columns.append(f'T{i+1}_Boundary')
+                        current_val = int(self.t_bins[i]) + 1 if i > 0 else int(self.t_bins[i])
+                        export_df[col_name] = f"T{i+1}: {current_val} to {int(self.t_bins[i+1])} times in total"
+                    boundary_columns.append(col_name)
             
-            # ============ A 的邊界說明 ============
+            # A 邊界
             if hasattr(self, 'a_bins') and self.a_bins is not None:
                 for i in range(len(self.a_bins)-1):
+                    col_name = f'A{i+1}_Boundary'
                     if i == len(self.a_bins)-2:
-                        export_df[f'A{i+1}_Boundary'] = f"A{i+1}: ${self.a_bins[i]:.0f} and above per participation"
+                        export_df[col_name] = f"A{i+1}: ${self.a_bins[i]:.0f} and above per participation"
                     else:
-                        next_value = self.a_bins[i+1]
-                        export_df[f'A{i+1}_Boundary'] = f"A{i+1}: ${self.a_bins[i]:.0f} to less than ${next_value:.0f} per participation"
-                    boundary_columns.append(f'A{i+1}_Boundary')
+                        export_df[col_name] = f"A{i+1}: ${self.a_bins[i]:.0f} to less than ${self.a_bins[i+1]:.0f} per participation"
+                    boundary_columns.append(col_name)
             
-            # 組合最終的欄位順序
+            # 5. 最終組合：基本數據 + 動態工作表清單 + 分級說明
             columns_to_export = base_columns + sheet_columns + boundary_columns
             
-            # 確保所有指定的列都存在，若不存在則填充為空
+            # 二次確認欄位是否存在，不存在補空值 (防呆)
             for col in columns_to_export:
                 if col not in export_df.columns:
                     export_df[col] = ""
@@ -523,6 +523,8 @@ class SecureRFMTAAnalyzer:
             
         except Exception as e:
             st.error(f"準備匯出資料時發生錯誤: {str(e)}")
+            # 發生錯誤時顯示追蹤資訊協助除錯
+            st.code(traceback.format_exc())
             return None
 
     def update_existing_google_sheet(self, export_df, sheet_name):
