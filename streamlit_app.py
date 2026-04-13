@@ -218,11 +218,24 @@ class SecureRFMTAAnalyzer:
             self.combined_data = pd.concat(self.data, ignore_index=True)
             
             # 篩選有效數據
-            self.combined_data = self.combined_data[
-                (self.combined_data['Email'].notna()) & 
-                (self.combined_data['Email'] != '') & 
+            amount_series = pd.to_numeric(self.combined_data['實際付款金額'], errors='coerce')
+
+            # 條件一：一般付款 - 付款狀態為「已付款」且實際付款金額 > 0
+            condition_normal = (
                 (self.combined_data['付款狀態'] == '已付款') &
-                (pd.to_numeric(self.combined_data['實際付款金額'], errors='coerce') > 0)
+                (amount_series > 0)
+            )
+
+            # 條件二：現場付款 - 付款方式為「現場付款」且付款狀態為「已完成」（金額為 0 也計入）
+            condition_onsite = (
+                (self.combined_data['付款方式'] == '現場付款') &
+                (self.combined_data['付款狀態'] == '已完成')
+            )
+
+            self.combined_data = self.combined_data[
+                (self.combined_data['Email'].notna()) &
+                (self.combined_data['Email'] != '') &
+                (condition_normal | condition_onsite)
             ]
             
             # 將 Email 轉換為小寫
