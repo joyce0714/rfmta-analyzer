@@ -229,7 +229,7 @@ class SecureRFMTAAnalyzer:
             # 條件二：現場付款 - 付款方式為「現場付款」且付款狀態為「已完成」（金額為 0 也計入）
             condition_onsite = (
                 (self.combined_data['付款方式'] == '現場付款') &
-                (self.combined_data['付款狀態'] == '已完成')
+                (self.combined_data['付款狀態'] == '已付款')
             )
 
             self.combined_data = self.combined_data[
